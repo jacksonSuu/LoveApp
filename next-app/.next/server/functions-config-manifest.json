@@ -1,0 +1,1 @@
+{"version":1,"functions":{"/api/admin/logout":{},"/api/admin/config":{},"/api/lottery/draw":{},"/api/admin/login":{},"/api/lottery/state":{},"/api/lottery/tasks/daily/[id]/complete":{},"/api/admin/password":{},"/api/lottery/tasks/special/[id]/complete":{}}}

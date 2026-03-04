@@ -21,9 +21,7 @@ export function ReelPanel({ rolling, activeIndex, prizePool }: ReelPanelProps) {
                         </div>
                     ))}
                 </div>
-                <div className={`reel-pointer ${rolling ? 'is-rolling' : ''}`} aria-hidden>
-                    <div className="reel-pointer-tip" />
-                </div>
+
             </div>
         </div>
     )

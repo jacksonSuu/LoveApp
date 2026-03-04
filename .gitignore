@@ -5,3 +5,7 @@ yarn-error.log*
 pnpm-debug.log*
 dist
 .env
+
+.next
+next*
+*next

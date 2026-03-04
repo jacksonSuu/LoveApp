@@ -1,4 +1,15 @@
-export type Prize = { name: string; weight: number; rare: boolean };
+export type PrizeTier = 'lucky' | 'heart' | 'rare' | 'ultimate';
+export type Prize = {
+    name: string;
+    weight: number;
+    rare: boolean;
+    description?: string;
+    color?: string;
+    emoji?: string;
+    tier?: PrizeTier;
+    coins?: number;
+};
+export type CoinExchange = { name: string; cost: number; description?: string };
 export type TaskCompleteMode = 'checkin' | 'verify';
 export type DailyTaskTemplate = { id: string; title: string; reward: number; maxTimes: number; mode: TaskCompleteMode };
 export type SpecialTaskTemplate = { id: string; title: string; reward: number; mode: TaskCompleteMode };
@@ -10,6 +21,7 @@ export type LotteryConfig = {
     maxTaskBonus: number;
     specialUnlockTarget: number;
     prizePool: Prize[];
+    coinExchanges: CoinExchange[];
     dailyTasks: DailyTaskTemplate[];
     specialTasks: SpecialTaskTemplate[];
 };
@@ -22,6 +34,7 @@ export type LotteryState = {
     dailyTasks: DailyTask[];
     specialTasks: SpecialTask[];
     results: string[];
+    coins: number;
 };
 
 export type PublicState = {
@@ -29,6 +42,7 @@ export type PublicState = {
     maxTaskBonus: number;
     specialUnlockTarget: number;
     prizePool: Prize[];
+    coinExchanges: CoinExchange[];
     usedChances: number;
     bonusChances: number;
     remainingChances: number;
@@ -37,6 +51,7 @@ export type PublicState = {
     specialUnlocked: boolean;
     specialTasks: SpecialTask[];
     results: string[];
+    coins: number;
 };
 
 export type ApiResponse = {
@@ -56,17 +71,31 @@ const activeAdminTokens = new Map<string, number>();
 const adminSessionTtlMs = 2 * 60 * 60 * 1000;
 
 let config: LotteryConfig = {
-    baseDailyChances: 50,
+    baseDailyChances: 20,
     maxTaskBonus: 10,
     specialUnlockTarget: 6,
     prizePool: [
-        { name: '晚安语音券', weight: 26, rare: false },
-        { name: '抱抱券', weight: 22, rare: false },
-        { name: '奶茶券', weight: 18, rare: false },
-        { name: '电影之夜券', weight: 14, rare: false },
-        { name: '周末约会优先权', weight: 10, rare: false },
-        { name: '神秘小礼物', weight: 7, rare: true },
-        { name: '惊喜大奖：整天女王体验', weight: 3, rare: true },
+        { name: '小心心泡泡', weight: 40, rare: false, description: '5.2元红包', color: '#FFB6C1', emoji: '💖💌', tier: 'lucky' },
+        { name: '金币', weight: 18, rare: false, description: '抽中可获得 1 枚金币', color: '#FFD700', emoji: '🪙', tier: 'lucky', coins: 1 },
+        { name: '告白糖糖', weight: 25, rare: false, description: '13.14元红包', color: '#FF69B4', emoji: '🍬💘', tier: 'lucky' },
+        { name: '蜜蜜零食包', weight: 20, rare: false, description: '零食大礼包', color: '#FFDAB9', emoji: '🍭🍪', tier: 'lucky' },
+        { name: '心心红包', weight: 10, rare: false, description: '13.14元红包', color: '#DA70D6', emoji: '💌💜', tier: 'heart' },
+        { name: '暖暖暴击', weight: 4, rare: false, description: '52元红包', color: '#FF4500', emoji: '💎🔥', tier: 'heart' },
+        { name: '小神秘心愿盒', weight: 0.8, rare: true, description: '可兑换衣服 / 520红包', color: '#98FF98', emoji: '🎁✨', tier: 'rare' },
+        {
+            name: '梦梦宝箱',
+            weight: 0.2,
+            rare: true,
+            description: '可兑换两日浪漫旅行 / 一天情侣水会 / 心动化妆品 / 萌萌大玩偶 / 1314红包',
+            color: 'linear-gradient(90deg, #FF69B4 0%, #FFD700 50%, #FF4500 100%)',
+            emoji: '🌈💖🎀',
+            tier: 'ultimate',
+        },
+    ],
+    coinExchanges: [
+        { name: '额外抽奖机会', cost: 10, description: '兑换1次额外抽奖机会' },
+        { name: '小礼品包', cost: 50, description: '兑换一个小礼品' },
+        { name: '大礼品包', cost: 100, description: '兑换一个大礼品' },
     ],
     dailyTasks: [
         { id: 'd1', title: '每日签到', reward: 1, maxTimes: 1, mode: 'checkin' },
@@ -101,6 +130,7 @@ function getInitialState(): LotteryState {
         dailyTasks: config.dailyTasks.map((t) => ({ ...t, doneTimes: 0 })),
         specialTasks: config.specialTasks.map((t) => ({ ...t, done: false })),
         results: [],
+        coins: 0,
     };
 }
 
@@ -172,6 +202,7 @@ function toResponse(current: LotteryState, message?: string, drawResults: string
             maxTaskBonus: config.maxTaskBonus,
             specialUnlockTarget: config.specialUnlockTarget,
             prizePool: config.prizePool,
+            coinExchanges: config.coinExchanges,
             usedChances: current.usedChances,
             bonusChances: current.bonusChances,
             remainingChances: remaining(current),
@@ -180,6 +211,7 @@ function toResponse(current: LotteryState, message?: string, drawResults: string
             specialUnlocked: isSpecialUnlocked(current),
             specialTasks: current.specialTasks,
             results: current.results.slice(),
+            coins: current.coins,
         },
     };
 }
@@ -207,7 +239,16 @@ function sanitizePrizePool(value: unknown): Prize[] | null {
         if (!item || typeof item !== 'object') return null;
         const record = item as Record<string, unknown>;
         const name = String(record.name || '').trim();
+        const description = String(record.description || '').trim();
+        const color = String(record.color || '').trim();
+        const emoji = String(record.emoji || '').trim();
         const weight = Number(record.weight);
+        const rawCoins = Number(record.coins);
+        const parsedCoins = Number.isFinite(rawCoins) && rawCoins > 0 ? Math.floor(rawCoins) : undefined;
+        const tierRaw = String(record.tier || '').trim();
+        const tier: PrizeTier | undefined = ['lucky', 'heart', 'rare', 'ultimate'].includes(tierRaw)
+            ? (tierRaw as PrizeTier)
+            : undefined;
         const rareRaw = record.rare;
         const rare =
             typeof rareRaw === 'boolean'
@@ -218,7 +259,7 @@ function sanitizePrizePool(value: unknown): Prize[] | null {
         if (!name || !Number.isFinite(weight) || weight <= 0) return null;
         if (usedNames.has(name)) return null;
         usedNames.add(name);
-        parsed.push({ name, weight, rare });
+        parsed.push({ name, weight, rare, description, color, emoji, tier, coins: parsedCoins ?? (name.includes('金币') ? 1 : undefined) });
     }
     return parsed;
 }
@@ -264,6 +305,24 @@ function sanitizeSpecialTasks(value: unknown): SpecialTaskTemplate[] | null {
         if (usedIds.has(id)) return null;
         usedIds.add(id);
         parsed.push({ id, title, reward, mode });
+    }
+    return parsed;
+}
+
+function sanitizeCoinExchanges(value: unknown): CoinExchange[] | null {
+    if (!Array.isArray(value) || value.length === 0) return null;
+    const parsed: CoinExchange[] = [];
+    const usedNames = new Set<string>();
+    for (const item of value) {
+        if (!item || typeof item !== 'object') return null;
+        const record = item as Record<string, unknown>;
+        const name = String(record.name || '').trim();
+        const description = String(record.description || '').trim();
+        const cost = Number(record.cost);
+        if (!name || !Number.isFinite(cost) || cost <= 0) return null;
+        if (usedNames.has(name)) return null;
+        usedNames.add(name);
+        parsed.push({ name, cost: Math.floor(cost), description });
     }
     return parsed;
 }
@@ -356,14 +415,45 @@ export async function draw(times: number): Promise<ApiResponse> {
         }
         current.usedChances += times;
         const drawResults: string[] = [];
+        let totalCoins = 0;
         for (let i = 0; i < times; i += 1) {
             const prize = pickPrize();
             const text = `${prize.rare ? '✨稀有✨ ' : ''}${prize.name}`;
             drawResults.push(text);
-            pushHistory(current, `抽中：${text}`);
+            const coinsGained = Math.max(0, Math.floor(Number(prize.coins || 0)));
+            if (coinsGained > 0) {
+                current.coins += coinsGained;
+                totalCoins += coinsGained;
+                pushHistory(current, `抽中：${text}，获得 ${coinsGained} 枚金币`);
+            } else {
+                pushHistory(current, `抽中：${text}`);
+            }
         }
         await writeState(current);
-        return toResponse(current, `已完成 ${times} 抽`, drawResults);
+        const summary = totalCoins > 0 ? `已完成 ${times} 抽，获得 ${totalCoins} 枚金币` : `已完成 ${times} 抽，本次未获得金币`;
+        return toResponse(current, summary, drawResults);
+    });
+}
+
+export async function exchangeCoins(exchangeIndex: number): Promise<ApiResponse> {
+    return runExclusive(async () => {
+        const current = await readState();
+        if (exchangeIndex < 0 || exchangeIndex >= config.coinExchanges.length) {
+            return { ok: false, message: '兑换选项不存在', state: toResponse(current).state };
+        }
+        const exchange = config.coinExchanges[exchangeIndex];
+        if (current.coins < exchange.cost) {
+            return { ok: false, message: `金币不足，需要 ${exchange.cost} 枚金币，当前 ${current.coins} 枚`, state: toResponse(current).state };
+        }
+        current.coins -= exchange.cost;
+        if (exchange.name === '额外抽奖机会') {
+            current.bonusChances += 1;
+            pushHistory(current, `兑换：${exchange.name}，消耗 ${exchange.cost} 枚金币`);
+        } else {
+            pushHistory(current, `兑换：${exchange.name}，消耗 ${exchange.cost} 枚金币`);
+        }
+        await writeState(current);
+        return toResponse(current, `兑换成功：${exchange.name}`);
     });
 }
 
@@ -389,7 +479,7 @@ export async function getAdminConfig(token: string): Promise<ApiResponse> {
 
 export async function updateAdminConfig(
     token: string,
-    payload: Partial<LotteryConfig> & { prizePool?: unknown; dailyTasks?: unknown; specialTasks?: unknown },
+    payload: Partial<LotteryConfig> & { prizePool?: unknown; dailyTasks?: unknown; specialTasks?: unknown; coinExchanges?: unknown },
 ): Promise<ApiResponse> {
     return runExclusive(async () => {
         if (!verifyToken(token)) return unauthorized();
@@ -402,7 +492,8 @@ export async function updateAdminConfig(
         const nextPrize = sanitizePrizePool(payload.prizePool);
         const nextDaily = sanitizeDailyTasks(payload.dailyTasks);
         const nextSpecial = sanitizeSpecialTasks(payload.specialTasks);
-        if (!nextPrize || !nextDaily || !nextSpecial) {
+        const nextExchanges = sanitizeCoinExchanges(payload.coinExchanges);
+        if (!nextPrize || !nextDaily || !nextSpecial || !nextExchanges) {
             return { ok: false, message: '任务或奖池配置格式不正确（请检查重复ID、空数组、非法概率）' };
         }
         config = {
@@ -410,6 +501,7 @@ export async function updateAdminConfig(
             maxTaskBonus: Math.floor(nextBonus),
             specialUnlockTarget: Math.floor(nextUnlock),
             prizePool: nextPrize,
+            coinExchanges: nextExchanges,
             dailyTasks: nextDaily,
             specialTasks: nextSpecial,
         };

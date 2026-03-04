@@ -4,6 +4,7 @@ import { type DependencyList, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { AnimatedModal } from '../components/lottery/AnimatedModal'
 import { PrizePanel } from '../components/lottery/PrizePanel'
+import { FragmentExchangePanel } from '../components/lottery/FragmentExchangePanel'
 import { ReelPanel } from '../components/lottery/ReelPanel'
 import { TaskSections } from '../components/lottery/TaskSections'
 import { TopBar } from '../components/lottery/TopBar'
@@ -85,6 +86,7 @@ export default function Page() {
         prizePool: '[]',
         dailyTasks: '[]',
         specialTasks: '[]',
+        coinExchanges: '[]',
     })
     const [adminForm, setAdminForm] = useState({ username: 'root', password: '' })
     const [adminPwdForm, setAdminPwdForm] = useState({ oldPassword: '', newPassword: '' })
@@ -107,11 +109,35 @@ export default function Page() {
     const lastToastAtRef = useRef(0)
     const speedRef = useRef(80)
     const settleStepsRef = useRef<number | null>(null)
+    const settleTotalStepsRef = useRef(0)
+    const settleDelaysRef = useRef<number[]>([])
+    const settlePointerRef = useRef(0)
+    const rollingStepRef = useRef(0)
     const targetIndexRef = useRef(0)
     const drawSkipRequestedRef = useRef(false)
     const drawFinishRef = useRef<(() => void) | null>(null)
 
+    const [showBackpack, setShowBackpack] = useState(false)
+    const [showHistoryModal, setShowHistoryModal] = useState(false)
+    const [showExchangeModal, setShowExchangeModal] = useState(false)
     const prizePool = state?.prizePool || []
+
+    const buildSettleDelays = (steps: number, targetMs: number) => {
+        if (steps <= 0) return []
+        const raw = Array.from({ length: steps }, (_, i) => {
+            const p = (i + 1) / steps
+            const base = 0.9 + Math.pow(p, 2) * 1.9 + Math.pow(p, 4) * 2.4
+            const tailBoost = p > 0.72 ? Math.pow((p - 0.72) / 0.28, 2) * 2.2 : 0
+            return base + tailBoost
+        })
+        const rawSum = raw.reduce((s, n) => s + n, 0)
+        const scaled = raw.map((w) => (w / rawSum) * targetMs)
+        const delays = scaled.map((d) => Math.round(Math.max(42, Math.min(300, d))))
+        const used = delays.reduce((s, n) => s + n, 0)
+        const diff = targetMs - used
+        delays[delays.length - 1] = Math.max(42, Math.min(320, delays[delays.length - 1] + diff))
+        return delays
+    }
 
     const showHint = (message: string, tone: HintTone = 'info') => {
         if (tone === 'success') return
@@ -201,8 +227,13 @@ export default function Page() {
         prizePool: isJsonValid(adminConfigDrafts.prizePool),
         dailyTasks: isJsonValid(adminConfigDrafts.dailyTasks),
         specialTasks: isJsonValid(adminConfigDrafts.specialTasks),
+        coinExchanges: isJsonValid(adminConfigDrafts.coinExchanges),
     }
-    const canSaveAdminConfig = adminJsonValidity.prizePool && adminJsonValidity.dailyTasks && adminJsonValidity.specialTasks
+    const canSaveAdminConfig =
+        adminJsonValidity.prizePool &&
+        adminJsonValidity.dailyTasks &&
+        adminJsonValidity.specialTasks &&
+        adminJsonValidity.coinExchanges
 
     const syncState = async () => {
         const data = await fetchJson('/api/lottery/state')
@@ -242,12 +273,12 @@ export default function Page() {
     }, [theme])
 
     useEffect(() => {
-        const hasModal = showAdmin || showTask || showResult || showDrawOverlay
+        const hasModal = showAdmin || showTask || showResult || showDrawOverlay || showBackpack || showHistoryModal || showExchangeModal
         document.body.style.overflow = hasModal ? 'hidden' : ''
         return () => {
             document.body.style.overflow = ''
         }
-    }, [showAdmin, showTask, showResult, showDrawOverlay])
+    }, [showAdmin, showTask, showResult, showDrawOverlay, showBackpack, showHistoryModal, showExchangeModal])
 
     useEffect(() => {
         if (!activeToast && toastQueue.length > 0) {
@@ -280,17 +311,25 @@ export default function Page() {
 
     const startRolling = (len: number) => {
         if (rollingTimer.current) clearTimeout(rollingTimer.current)
-        speedRef.current = 80
+        speedRef.current = 82
         settleStepsRef.current = null
+        settleTotalStepsRef.current = 0
+        settleDelaysRef.current = []
+        settlePointerRef.current = 0
+        rollingStepRef.current = 0
         setRolling(true)
 
         const tick = () => {
             setActiveIndex((prev) => (len === 0 ? 0 : (prev + 1) % len))
+            rollingStepRef.current += 1
             const stepsLeft = settleStepsRef.current
             if (stepsLeft !== null) {
-                settleStepsRef.current = stepsLeft - 1
-                speedRef.current = Math.min(240, speedRef.current + 8)
-                if (settleStepsRef.current !== null && settleStepsRef.current <= 0) {
+                const nextSteps = stepsLeft - 1
+                settleStepsRef.current = nextSteps
+                speedRef.current = settleDelaysRef.current[settlePointerRef.current] ?? speedRef.current
+                settlePointerRef.current += 1
+
+                if (nextSteps <= 0) {
                     setActiveIndex(targetIndexRef.current % Math.max(len, 1))
                     setRolling(false)
                     if (onCompleteRef.current) {
@@ -299,6 +338,9 @@ export default function Page() {
                     }
                     return
                 }
+            } else {
+                const accel = Math.min(1, rollingStepRef.current / 10)
+                speedRef.current = Math.round(82 - accel * 30)
             }
             rollingTimer.current = setTimeout(tick, speedRef.current)
         }
@@ -321,8 +363,14 @@ export default function Page() {
         targetIndexRef.current = idx === -1 ? 0 : idx
         const current = activeIndex
         const forward = (targetIndexRef.current - current + len) % len
-        settleStepsRef.current = len * 2 + forward + 6
-        speedRef.current = 120
+        const settleSteps = Math.max(10, Math.min(16, forward + Math.ceil(len * 0.8) + 2))
+        const rawDuration = 3000 + len * 70 + forward * 42
+        const settleDuration = Math.max(3000, Math.min(4000, rawDuration))
+        settleDelaysRef.current = buildSettleDelays(settleSteps, settleDuration)
+        settleStepsRef.current = settleSteps
+        settleTotalStepsRef.current = settleSteps
+        settlePointerRef.current = 0
+        speedRef.current = settleDelaysRef.current[0] ?? 70
     }
 
     const draw = async (times: 1 | 5) => {
@@ -410,9 +458,30 @@ export default function Page() {
         if (drawSequenceTimer.current) clearTimeout(drawSequenceTimer.current)
         onCompleteRef.current = null
         settleStepsRef.current = null
+        settleTotalStepsRef.current = 0
+        settleDelaysRef.current = []
+        settlePointerRef.current = 0
+        rollingStepRef.current = 0
         setRolling(false)
         const finish = drawFinishRef.current
         finish()
+    }
+
+    const exchangeCoins = async (index: number) => {
+        const data = await fetchJson(
+            '/api/lottery/exchange',
+            {
+                method: 'POST',
+                body: JSON.stringify({ index }),
+            },
+        )
+        if (!data.ok) {
+            showHint(data.message || '兑换失败', 'error')
+            if (data.state) setState(data.state)
+            return
+        }
+        showHint(data.message || '兑换成功', 'success')
+        if (data.state) setState(data.state)
     }
 
     const completeDaily = async (id: string) => {
@@ -515,7 +584,7 @@ export default function Page() {
             showHint(data.message || '管理员配置获取失败', 'error')
             setAdminToken('')
             setAdminConfig(null)
-            setAdminConfigDrafts({ prizePool: '[]', dailyTasks: '[]', specialTasks: '[]' })
+            setAdminConfigDrafts({ prizePool: '[]', dailyTasks: '[]', specialTasks: '[]', coinExchanges: '[]' })
             return
         }
         setAdminConfig(data.config)
@@ -523,6 +592,7 @@ export default function Page() {
             prizePool: JSON.stringify(data.config?.prizePool ?? [], null, 2),
             dailyTasks: JSON.stringify(data.config?.dailyTasks ?? [], null, 2),
             specialTasks: JSON.stringify(data.config?.specialTasks ?? [], null, 2),
+            coinExchanges: JSON.stringify(data.config?.coinExchanges ?? [], null, 2),
         })
     }
 
@@ -535,10 +605,12 @@ export default function Page() {
         let prizePool: unknown[] = []
         let dailyTasks: unknown[] = []
         let specialTasks: unknown[] = []
+        let coinExchanges: unknown[] = []
         try {
             prizePool = JSON.parse(adminConfigDrafts.prizePool || '[]')
             dailyTasks = JSON.parse(adminConfigDrafts.dailyTasks || '[]')
             specialTasks = JSON.parse(adminConfigDrafts.specialTasks || '[]')
+            coinExchanges = JSON.parse(adminConfigDrafts.coinExchanges || '[]')
         } catch {
             showHint('JSON 格式有误，请先修正后再保存', 'error')
             return
@@ -555,6 +627,7 @@ export default function Page() {
                     prizePool,
                     dailyTasks,
                     specialTasks,
+                    coinExchanges,
                 }),
             },
             adminToken,
@@ -575,6 +648,7 @@ export default function Page() {
                 prizePool: JSON.stringify(data.config.prizePool ?? [], null, 2),
                 dailyTasks: JSON.stringify(data.config.dailyTasks ?? [], null, 2),
                 specialTasks: JSON.stringify(data.config.specialTasks ?? [], null, 2),
+                coinExchanges: JSON.stringify(data.config.coinExchanges ?? [], null, 2),
             })
         }
         await syncState()
@@ -613,11 +687,11 @@ export default function Page() {
         }
         setAdminToken('')
         setAdminConfig(null)
-        setAdminConfigDrafts({ prizePool: '[]', dailyTasks: '[]', specialTasks: '[]' })
+        setAdminConfigDrafts({ prizePool: '[]', dailyTasks: '[]', specialTasks: '[]', coinExchanges: '[]' })
         showHint('已退出管理员登录', 'info')
     }
 
-    const handleJsonUpdate = (field: 'prizePool' | 'dailyTasks' | 'specialTasks', value: string) => {
+    const handleJsonUpdate = (field: 'prizePool' | 'dailyTasks' | 'specialTasks' | 'coinExchanges', value: string) => {
         setAdminConfigDrafts((prev) => ({ ...prev, [field]: value }))
     }
 
@@ -625,12 +699,15 @@ export default function Page() {
         const onEsc = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return
             if (showAdmin) setShowAdmin(false)
+            else if (showBackpack) setShowBackpack(false)
+            else if (showHistoryModal) setShowHistoryModal(false)
+            else if (showExchangeModal) setShowExchangeModal(false)
             else if (showTask) setShowTask(false)
             else if (showResult) setShowResult(false)
         }
         window.addEventListener('keydown', onEsc)
         return () => window.removeEventListener('keydown', onEsc)
-    }, [showAdmin, showTask, showResult])
+    }, [showAdmin, showBackpack, showHistoryModal, showExchangeModal, showTask, showResult])
 
     const adminLoggedIn = !!adminToken && !!adminConfig
     const remaining = state?.remainingChances ?? 0
@@ -647,6 +724,45 @@ export default function Page() {
     const currentHistoryPage = Math.min(historyPage, historyTotalPages)
     const historyStart = (currentHistoryPage - 1) * HISTORY_PAGE_SIZE
     const historyPageItems = historyItems.slice(historyStart, historyStart + HISTORY_PAGE_SIZE)
+    const normalizeResultName = (raw: string) =>
+        raw
+            .replace(/^✨稀有✨\s*/, '')
+            .replace(/^\[RARE\]\s*/i, '')
+            .trim()
+    const backpackMap = new Map<string, { name: string; count: number; rare: boolean; order: number }>()
+        ; (state?.results ?? []).forEach((entry) => {
+            const normalized = normalizeResultName(entry)
+            const matchedIndex = prizePool.findIndex((p) => normalized === p.name || normalized.includes(p.name) || p.name.includes(normalized))
+            const matchedPrize = matchedIndex >= 0 ? prizePool[matchedIndex] : null
+            const name = matchedPrize?.name || normalized || '未知奖品'
+            const existing = backpackMap.get(name)
+            if (existing) {
+                existing.count += 1
+                existing.rare = existing.rare || /✨稀有✨|\[RARE\]/.test(entry) || !!matchedPrize?.rare
+                return
+            }
+            backpackMap.set(name, {
+                name,
+                count: 1,
+                rare: /✨稀有✨|\[RARE\]/.test(entry) || !!matchedPrize?.rare,
+                order: matchedIndex >= 0 ? matchedIndex : Number.MAX_SAFE_INTEGER,
+            })
+        })
+    const backpackItems = Array.from(backpackMap.values()).sort((a, b) => b.count - a.count || a.order - b.order || a.name.localeCompare(b.name, 'zh-CN'))
+    const backpackSlots = Array.from({ length: 20 }, (_, idx) => backpackItems[idx] ?? null)
+    const prizeExchangeRules = prizePool.map((item) => {
+        const exchange = (item.description || '').replace(/^可兑换[:：]?\s*/, '').trim() || '以活动现场公布内容为准'
+        return `【奖品说明】${item.name}：${exchange}`
+    })
+    const policyRules = [
+        '本活动采用系统随机抽取机制；参与即视为同意本活动规则及相关说明。',
+        '每位用户每日可获得基础抽奖次数，额外次数以任务奖励与系统发放结果为准。',
+        '抽奖结果以系统实时展示与记录为准；若因网络波动导致延迟，请以最终记录为准。',
+        '金币仅限在活动页面内兑换指定权益，不支持提现、转让或折现。',
+        '实物或权益类奖品请在通知期限内完成确认，逾期未确认视为自动放弃。',
+        '如遇不可抗力、系统升级或法律法规调整，主办方有权在合法范围内进行规则优化并公示。',
+    ]
+    const displayRules = [...policyRules, ...prizeExchangeRules]
     const drawHelper = !state
         ? '正在同步抽奖数据...'
         : spinning
@@ -731,61 +847,167 @@ export default function Page() {
                         <small>{specialUnlocked ? '已解锁' : '未解锁'}</small>
                     </article>
                 </section>
-                <PrizePanel prizePool={prizePool} />
+                <section className="home-layout" aria-label="首页主内容布局">
+                    <div className="left-stack">
 
-                <div className="actions">
-                    <button className="btn primary" disabled={!canSingleDraw} onClick={() => draw(1)}>
-                        {spinning ? '抽奖中...' : '单抽'}
-                    </button>
-                    <button className="btn" disabled={!canFiveDraw} onClick={() => draw(5)}>
-                        {spinning ? '处理中...' : '五连抽'}
-                    </button>
-                </div>
+                        <PrizePanel prizePool={prizePool} onOpenBackpack={() => setShowBackpack(true)} />
 
+                        <div className="actions draw-actions">
+                            <button className="btn primary" disabled={!canSingleDraw} onClick={() => draw(1)}>
+                                {spinning ? '抽奖中...' : '单抽'}
+                            </button>
+                            <button className="btn" disabled={!canFiveDraw} onClick={() => draw(5)}>
+                                {spinning ? '处理中...' : '五连抽'}
+                            </button>
+                        </div>
 
-                {/* <p className="action-helper">{drawHelper}</p> */}
+                        {/* <p className="action-helper">{drawHelper}</p> */}
 
-                <section className="history-panel" aria-label="抽奖记录">
-                    <div className="history-head">
-                        <h3>抽奖记录</h3>
-                        <small className="small-tip">共 {historyItems.length} 条</small>
+                        <section className="rules-panel" aria-label="活动规则">
+                            <div className="history-head">
+                                <h3>活动规则</h3>
+                            </div>
+                            <ul className="rules-list">
+                                {displayRules.map((rule) => (
+                                    <li key={rule}>{rule}</li>
+                                ))}
+                            </ul>
+                        </section>
                     </div>
 
-                    {historyItems.length === 0 ? (
-                        <div className="history-empty">还没有记录，先抽一发试试手气吧 ✨</div>
-                    ) : (
-                        <>
-                            <ul className="history-list">
-                                {historyPageItems.map((item, idx) => {
-                                    const order = historyItems.length - (historyStart + idx)
-                                    return (
-                                        <li key={`${order}-${item}`} className="history-item">
-                                            <span className="history-index">#{order}</span>
-                                            <span className="history-text">{item}</span>
-                                        </li>
-                                    )
-                                })}
-                            </ul>
+                    <aside className="right-rail" aria-label="侧边信息">
+                        <section className="backpack-panel" aria-label="我的背包">
+                            <div className="panel-head">
+                                <h3>我的背包</h3>
 
-                            <div className="history-pager">
-                                <button className="btn" onClick={() => setHistoryPage((p) => Math.max(1, p - 1))} disabled={currentHistoryPage <= 1}>
-                                    上一页
-                                </button>
-                                <span className="history-page-info">
-                                    第 {currentHistoryPage} / {historyTotalPages} 页
-                                </span>
-                                <button
-                                    className="btn"
-                                    onClick={() => setHistoryPage((p) => Math.min(historyTotalPages, p + 1))}
-                                    disabled={currentHistoryPage >= historyTotalPages}
-                                >
-                                    下一页
-                                </button>
+                                <div className="backpack-head-actions">
+                                    <button className="text-btn" onClick={() => setShowHistoryModal(true)}>
+                                        抽奖记录
+                                    </button>
+                                    <button className="text-btn" onClick={() => setShowExchangeModal(true)}>
+                                        金币兑换
+                                    </button>
+                                </div>
                             </div>
-                        </>
-                    )}
+                            <p className="small-tip">已收集 {backpackItems.length} 种奖品，点击查看 20 格背包</p>
+                            <button className="btn primary" onClick={() => setShowBackpack(true)}>
+                                打开我的背包
+                            </button>
+                        </section>
+                    </aside>
                 </section>
             </main>
+
+            <AnimatePresence>
+                {showBackpack && (
+                    <AnimatedModal onClose={() => setShowBackpack(false)}>
+                        <div className="modal-head">
+                            <h2>我的背包</h2>
+                            <div className="backpack-head-actions">
+                                <button className="text-btn" onClick={() => setShowHistoryModal(true)}>
+                                    抽奖记录
+                                </button>
+                                <button className="text-btn" onClick={() => setShowExchangeModal(true)}>
+                                    金币兑换
+                                </button>
+                            </div>
+                        </div>
+                        <p className="small-tip">已收集 {backpackItems.length} 种奖品</p>
+                        <div className="backpack-grid">
+                            {backpackSlots.map((slot, idx) => (
+                                <article key={`slot-${idx}`} className={`backpack-slot ${slot ? 'filled' : ''} ${slot?.rare ? 'rare' : ''}`}>
+                                    {slot ? (
+                                        <>
+                                            <span className="backpack-slot-name" title={slot.name}>{slot.name}</span>
+                                            <span className="backpack-slot-count">x{slot.count}</span>
+                                        </>
+                                    ) : (
+                                        <span className="backpack-slot-empty">{idx + 1}</span>
+                                    )}
+                                </article>
+                            ))}
+                        </div>
+                        <div className="modal-actions">
+                            <button className="btn" onClick={() => setShowBackpack(false)}>
+                                关闭
+                            </button>
+                        </div>
+                    </AnimatedModal>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {showHistoryModal && (
+                    <AnimatedModal onClose={() => setShowHistoryModal(false)}>
+                        <div className="modal-head">
+                            <h2>抽奖记录</h2>
+                        </div>
+                        <section className="history-panel" aria-label="抽奖记录弹窗">
+                            <div className="history-head">
+                                <small className="small-tip">共 {historyItems.length} 条</small>
+                            </div>
+                            {historyItems.length === 0 ? (
+                                <div className="history-empty">还没有记录，先抽一发试试手气吧 ✨</div>
+                            ) : (
+                                <>
+                                    <ul className="history-list">
+                                        {historyPageItems.map((item, idx) => {
+                                            const order = historyItems.length - (historyStart + idx)
+                                            return (
+                                                <li key={`${order}-${item}`} className="history-item">
+                                                    <span className="history-index">#{order}</span>
+                                                    <span className="history-text">{item}</span>
+                                                </li>
+                                            )
+                                        })}
+                                    </ul>
+                                    <div className="history-pager">
+                                        <button className="btn" onClick={() => setHistoryPage((p) => Math.max(1, p - 1))} disabled={currentHistoryPage <= 1}>
+                                            上一页
+                                        </button>
+                                        <span className="history-page-info">
+                                            第 {currentHistoryPage} / {historyTotalPages} 页
+                                        </span>
+                                        <button
+                                            className="btn"
+                                            onClick={() => setHistoryPage((p) => Math.min(historyTotalPages, p + 1))}
+                                            disabled={currentHistoryPage >= historyTotalPages}
+                                        >
+                                            下一页
+                                        </button>
+                                    </div>
+                                </>
+                            )}
+                        </section>
+                        <div className="modal-actions">
+                            <button className="btn" onClick={() => setShowHistoryModal(false)}>
+                                关闭
+                            </button>
+                        </div>
+                    </AnimatedModal>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {showExchangeModal && (
+                    <AnimatedModal onClose={() => setShowExchangeModal(false)}>
+                        <div className="modal-head">
+                            <h2>金币兑换</h2>
+                        </div>
+                        <FragmentExchangePanel
+                            coinExchanges={state?.coinExchanges || []}
+                            coins={state?.coins || 0}
+                            onExchange={exchangeCoins}
+                            embedded
+                        />
+                        <div className="modal-actions">
+                            <button className="btn" onClick={() => setShowExchangeModal(false)}>
+                                关闭
+                            </button>
+                        </div>
+                    </AnimatedModal>
+                )}
+            </AnimatePresence>
 
             <AnimatePresence>
                 {showDrawOverlay && (
@@ -820,9 +1042,6 @@ export default function Page() {
                     <AnimatedModal onClose={() => setShowResult(false)}>
                         <div className="modal-head">
                             <h2>抽奖结果</h2>
-                            <button className="text-btn" onClick={() => setShowResult(false)}>
-                                确认
-                            </button>
                         </div>
                         <div className="result-list">
                             {resultList.map((t, i) => (
@@ -830,6 +1049,11 @@ export default function Page() {
                                     {t.replace('[RARE]', '✨稀有✨ ')}
                                 </div>
                             ))}
+                        </div>
+                        <div className="modal-actions">
+                            <button className="btn primary" onClick={() => setShowResult(false)}>
+                                确认
+                            </button>
                         </div>
                     </AnimatedModal>
                 )}
@@ -840,9 +1064,6 @@ export default function Page() {
                     <AnimatedModal onClose={() => setShowTask(false)}>
                         <div className="modal-head">
                             <h2>任务套餐</h2>
-                            <button className="text-btn" onClick={() => setShowTask(false)}>
-                                关闭
-                            </button>
                         </div>
                         <p className="sub-tip">完成任务可累计赠送抽奖次数（每日最多 +10 次）</p>
                         <TaskSections
@@ -852,6 +1073,11 @@ export default function Page() {
                             submittingDailyId={dailySubmittingId}
                             submittingSpecialId={specialSubmittingId}
                         />
+                        <div className="modal-actions">
+                            <button className="btn" onClick={() => setShowTask(false)}>
+                                关闭
+                            </button>
+                        </div>
                     </AnimatedModal>
                 )}
             </AnimatePresence>
@@ -861,9 +1087,6 @@ export default function Page() {
                     <AnimatedModal onClose={() => setShowAdmin(false)}>
                         <div className="modal-head">
                             <h2>管理员面板</h2>
-                            <button className="text-btn" onClick={() => setShowAdmin(false)}>
-                                关闭
-                            </button>
                         </div>
 
                         {!adminLoggedIn && (
@@ -956,6 +1179,14 @@ export default function Page() {
                                         onChange={(e) => handleJsonUpdate('specialTasks', e.target.value)}
                                     />
                                     {!adminJsonValidity.specialTasks && <small className="small-tip error-tip">特殊任务 JSON 格式错误</small>}
+                                    <label>金币兑换 JSON</label>
+                                    <textarea
+                                        className="input textarea"
+                                        rows={6}
+                                        value={adminConfigDrafts.coinExchanges}
+                                        onChange={(e) => handleJsonUpdate('coinExchanges', e.target.value)}
+                                    />
+                                    {!adminJsonValidity.coinExchanges && <small className="small-tip error-tip">金币兑换 JSON 格式错误</small>}
                                     <button className="btn primary" disabled={adminBusy || !canSaveAdminConfig} onClick={saveAdminConfig}>
                                         {adminBusy ? '保存中...' : '保存配置'}
                                     </button>
@@ -984,6 +1215,12 @@ export default function Page() {
                                 </div>
                             </div>
                         )}
+
+                        <div className="modal-actions">
+                            <button className="btn" onClick={() => setShowAdmin(false)}>
+                                关闭
+                            </button>
+                        </div>
                     </AnimatedModal>
                 )}
             </AnimatePresence>

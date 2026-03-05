@@ -875,26 +875,6 @@ export default function Page() {
                         </section>
                     </div>
 
-                    <aside className="right-rail" aria-label="侧边信息">
-                        <section className="backpack-panel" aria-label="我的背包">
-                            <div className="panel-head">
-                                <h3>我的背包</h3>
-
-                                <div className="backpack-head-actions">
-                                    <button className="text-btn" onClick={() => setShowHistoryModal(true)}>
-                                        抽奖记录
-                                    </button>
-                                    <button className="text-btn" onClick={() => setShowExchangeModal(true)}>
-                                        金币兑换
-                                    </button>
-                                </div>
-                            </div>
-                            <p className="small-tip">已收集 {backpackItems.length} 种奖品，点击查看 20 格背包</p>
-                            <button className="btn primary" onClick={() => setShowBackpack(true)}>
-                                打开我的背包
-                            </button>
-                        </section>
-                    </aside>
                 </section>
             </main>
 

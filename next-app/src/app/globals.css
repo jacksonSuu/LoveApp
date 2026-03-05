@@ -175,10 +175,18 @@ body {
     gap: 18px;
 }
 
+.loading-card,
+.kpi-grid,
+.reel,
+.home-layout,
+.action-helper {
+    width: min(980px, 92vw);
+    margin-inline: auto;
+}
+
 .home-layout {
-    width: min(1200px, 94vw);
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 360px;
+    grid-template-columns: minmax(0, 1fr);
     align-items: start;
     gap: 16px;
 }
@@ -199,7 +207,6 @@ body {
 }
 
 .loading-card {
-    width: min(980px, 92vw);
     border: 1px dashed var(--line-strong);
     border-radius: 14px;
     background: color-mix(in oklab, var(--glass-strong) 92%, #fff);
@@ -209,7 +216,6 @@ body {
 }
 
 .kpi-grid {
-    width: min(980px, 92vw);
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 10px;
@@ -262,7 +268,6 @@ body {
     display: grid;
     gap: 12px;
     align-items: center;
-    width: min(980px, 92vw);
 }
 
 .reel-header {
@@ -394,7 +399,6 @@ body {
 
 .action-helper {
     margin: 0;
-    width: min(980px, 92vw);
     text-align: center;
     color: var(--text-soft);
     font-size: 13px;
@@ -560,14 +564,22 @@ body {
     overflow: hidden;
     background: color-mix(in oklab, var(--glass-strong) 94%, #fff);
     box-shadow: 0 8px 18px rgba(228, 120, 171, 0.14);
+    display: grid;
+    grid-template-rows: 132px auto;
 }
 
 .prize-slide-card img {
     width: 100%;
-    height: auto;
+    height: 132px;
     display: block;
-    aspect-ratio: 5 / 3;
-    object-fit: cover;
+    object-fit: contain;
+    object-position: center;
+    padding: 8px;
+    background: #fff;
+}
+
+.prize-slide-card img.is-coin {
+    padding: 35px;
 }
 
 .prize-slide-name {
@@ -610,15 +622,17 @@ body {
     overflow: hidden;
     box-shadow: 0 10px 20px rgba(228, 120, 171, 0.16);
     display: grid;
-    gap: 0;
+    grid-template-rows: 132px auto;
 }
 
 .name-mockup-card img {
     width: 100%;
-    height: auto;
+    height: 132px;
     display: block;
-    aspect-ratio: 5 / 3;
-    object-fit: cover;
+    object-fit: contain;
+    object-position: center;
+    padding: 8px;
+    background: #fff;
 }
 
 .name-mockup-card figcaption {

@@ -1,5 +1,4 @@
 {
-  "/api/lottery/state/route": "app/api/lottery/state/route.js",
-  "/api/lottery/draw/route": "app/api/lottery/draw/route.js",
-  "/page": "app/page.js"
+  "/page": "app/page.js",
+  "/api/lottery/state/route": "app/api/lottery/state/route.js"
 }

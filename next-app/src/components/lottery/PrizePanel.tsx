@@ -13,16 +13,23 @@ export function PrizePanel({ prizePool, onOpenBackpack }: PrizePanelProps) {
     const rafRef = useRef<number | null>(null)
     const lastTimeRef = useRef(0)
     const pauseUntilRef = useRef(0)
+    const scrollPosRef = useRef(0)
 
     const imageByName: Record<string, string> = {
-        小心心泡泡: '/prize-name-only/xiaoxinxin-paopao.svg',
-        告白糖糖: '/prize-name-only/gaobai-tangtang.svg',
-        蜜蜜零食包: '/prize-name-only/mimi-lingshibao.svg',
-        心心红包: '/prize-name-only/xinxin-hongbao.svg',
-        小神秘心愿盒: '/prize-name-only/xinyuan-he.svg',
-        心愿盒: '/prize-name-only/xinyuan-he.svg',
-        梦梦宝箱: '/prize-name-only/mengmeng-baoxiang.svg',
-        金币: '/prize-name-only/jinbi.svg',
+        小心心泡泡: '/prize-name-only/01_心心泡泡.png',
+        心心泡泡: '/prize-name-only/01_心心泡泡.png',
+        告白糖糖: '/prize-name-only/02_心心糖果.png',
+        心心糖果: '/prize-name-only/02_心心糖果.png',
+        蜜蜜零食包: '/prize-name-only/03_心心零食.png',
+        心心零食: '/prize-name-only/03_心心零食.png',
+        心心红包: '/prize-name-only/04_心心红包.png',
+        暖暖暴击: '/prize-name-only/05_心心惊喜.png',
+        小神秘心愿盒: '/prize-name-only/06_心心礼盒.png',
+        心愿盒: '/prize-name-only/06_心心礼盒.png',
+        心心礼盒: '/prize-name-only/06_心心礼盒.png',
+        梦梦宝箱: '/prize-name-only/07_心心宝箱.png',
+        心心宝箱: '/prize-name-only/07_心心宝箱.png',
+        金币: '/prize-name-only/08_金币.png',
     }
 
     const items = prizePool.length ? prizePool : [{ name: '暂无奖品', weight: 0, rare: false }]
@@ -32,14 +39,24 @@ export function PrizePanel({ prizePool, onOpenBackpack }: PrizePanelProps) {
         const viewport = viewportRef.current
         if (!viewport) return
 
+        let resizeObserver: ResizeObserver | null = null
+
         const normalizeScroll = () => {
             const loopWidth = viewport.scrollWidth / 2
             if (!Number.isFinite(loopWidth) || loopWidth <= 0) return
-            if (viewport.scrollLeft >= loopWidth) {
-                viewport.scrollLeft -= loopWidth
-            } else if (viewport.scrollLeft <= 0) {
-                viewport.scrollLeft += loopWidth
+
+            if (scrollPosRef.current >= loopWidth || scrollPosRef.current < 0) {
+                scrollPosRef.current = ((scrollPosRef.current % loopWidth) + loopWidth) % loopWidth
             }
+
+            viewport.scrollLeft = scrollPosRef.current
+        }
+
+        const resetScroll = () => {
+            const loopWidth = viewport.scrollWidth / 2
+            if (!Number.isFinite(loopWidth) || loopWidth <= 0) return
+            scrollPosRef.current = loopWidth
+            normalizeScroll()
         }
 
         const touchPause = () => {
@@ -47,58 +64,67 @@ export function PrizePanel({ prizePool, onOpenBackpack }: PrizePanelProps) {
         }
 
         const onScroll = () => {
+            scrollPosRef.current = viewport.scrollLeft
             normalizeScroll()
-            touchPause()
         }
 
         const onPointerDown = () => touchPause()
         const onPointerUp = () => {
             pauseUntilRef.current = Date.now() + 900
         }
-        const onMouseEnter = () => {
-            pauseUntilRef.current = Date.now() + 10_000
-        }
-        const onMouseLeave = () => {
-            pauseUntilRef.current = Date.now() + 400
-        }
+        const onWheel = () => touchPause()
 
         const animate = (now: number) => {
             const dt = lastTimeRef.current ? now - lastTimeRef.current : 16
             lastTimeRef.current = now
             const isPaused = Date.now() < pauseUntilRef.current
-            if (!isPaused) {
-                viewport.scrollLeft += (dt / 1000) * 28
+
+            const canLoop = viewport.scrollWidth > viewport.clientWidth + 1
+            if (!isPaused && canLoop) {
+                scrollPosRef.current += (dt / 1000) * 28
                 normalizeScroll()
             }
             rafRef.current = requestAnimationFrame(animate)
         }
 
-        viewport.scrollLeft = Math.max(0, viewport.scrollWidth / 2)
+        resetScroll()
+
+        if (typeof ResizeObserver !== 'undefined') {
+            resizeObserver = new ResizeObserver(() => {
+                resetScroll()
+            })
+            resizeObserver.observe(viewport)
+        }
+
         lastTimeRef.current = 0
         rafRef.current = requestAnimationFrame(animate)
 
         viewport.addEventListener('scroll', onScroll, { passive: true })
         viewport.addEventListener('pointerdown', onPointerDown)
         viewport.addEventListener('pointerup', onPointerUp)
-        viewport.addEventListener('mouseenter', onMouseEnter)
-        viewport.addEventListener('mouseleave', onMouseLeave)
+        viewport.addEventListener('wheel', onWheel, { passive: true })
 
         return () => {
             viewport.removeEventListener('scroll', onScroll)
             viewport.removeEventListener('pointerdown', onPointerDown)
             viewport.removeEventListener('pointerup', onPointerUp)
-            viewport.removeEventListener('mouseenter', onMouseEnter)
-            viewport.removeEventListener('mouseleave', onMouseLeave)
+            viewport.removeEventListener('wheel', onWheel)
             if (rafRef.current) cancelAnimationFrame(rafRef.current)
+            if (resizeObserver) resizeObserver.disconnect()
             rafRef.current = null
         }
     }, [prizePool])
 
     const resolveImage = (name: string) => {
         if (imageByName[name]) return imageByName[name]
-        if (name.includes('心愿')) return '/prize-name-only/xinyuan-he.svg'
-        if (name.includes('金币')) return '/prize-name-only/jinbi.svg'
-        return '/prize-name-only/xiaoxinxin-paopao.svg'
+        if (name.includes('金币')) return '/prize-name-only/08_金币.png'
+        if (name.includes('宝箱')) return '/prize-name-only/07_心心宝箱.png'
+        if (name.includes('礼盒') || name.includes('心愿')) return '/prize-name-only/06_心心礼盒.png'
+        if (name.includes('惊喜') || name.includes('暴击')) return '/prize-name-only/05_心心惊喜.png'
+        if (name.includes('红包')) return '/prize-name-only/04_心心红包.png'
+        if (name.includes('零食')) return '/prize-name-only/03_心心零食.png'
+        if (name.includes('糖')) return '/prize-name-only/02_心心糖果.png'
+        return '/prize-name-only/01_心心泡泡.png'
     }
 
     return (
@@ -126,8 +152,12 @@ export function PrizePanel({ prizePool, onOpenBackpack }: PrizePanelProps) {
                 <div className="prize-slider-track">
                     {infiniteItems.map((p, idx) => (
                         <article key={`${p.name}-${idx}`} className={`prize-slide-card ${p.rare ? 'rare' : ''}`}>
-                            <img src={resolveImage(p.name)} alt={p.name} loading="lazy" />
-                            <div className="prize-slide-name">{p.name}</div>
+                            <img
+                                src={resolveImage(p.name)}
+                                alt={p.name}
+                                loading="lazy"
+                                className={p.name.includes('金币') ? 'is-coin' : undefined}
+                            />
                         </article>
                     ))}
                 </div>

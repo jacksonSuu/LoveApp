@@ -6,6 +6,7 @@ pnpm-debug.log*
 dist
 .env
 
-.next
+*.next
 next*
 *next
+.*next

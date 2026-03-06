@@ -15,6 +15,8 @@ type ApiResponse = {
     message?: string
     drawResults?: string[]
     state?: LotteryState
+    userId?: string
+    registered?: boolean
     token?: string
     username?: string
     config?: any
@@ -34,12 +36,30 @@ const TOAST_AUTO_HIDE_MS = 3200
 const TOAST_THROTTLE_MS = 450
 const TOAST_MAX_QUEUE = 20
 const HISTORY_PAGE_SIZE = 10
+const USER_TOKEN_STORAGE_KEY = 'lottery_user_token'
+const USER_ID_STORAGE_KEY = 'lottery_user_id'
+const USER_NAME_STORAGE_KEY = 'lottery_username'
+
+let cachedUserId = ''
+
+const getOrCreateUserId = (): string => {
+    if (cachedUserId) return cachedUserId
+    if (typeof window === 'undefined') return ''
+    const current = (localStorage.getItem(USER_TOKEN_STORAGE_KEY) || localStorage.getItem(USER_ID_STORAGE_KEY) || '').trim()
+    if (current) {
+        cachedUserId = current
+        return cachedUserId
+    }
+    return ''
+}
 
 const fetchJson = async (url: string, options: RequestInit = {}, token = ''): Promise<ApiResponse> => {
     try {
         const headers: Record<string, string> = {}
         if (options.body !== undefined) headers['Content-Type'] = 'application/json'
         if (token) headers.Authorization = `Bearer ${token}`
+        const userId = getOrCreateUserId()
+        if (userId) headers['x-user-id'] = userId
 
         const res = await fetch(url, { ...options, headers: { ...headers, ...(options.headers as Record<string, string> | undefined) } })
         const contentType = res.headers.get('content-type') || ''
@@ -70,12 +90,17 @@ function useAsyncEffect(fn: () => Promise<void>, deps: DependencyList) {
 }
 
 export default function Page() {
+    const [currentUser, setCurrentUser] = useState<{ userId: string; username: string } | null>(null)
+    const [authNameInput, setAuthNameInput] = useState('')
+    const [authBusy, setAuthBusy] = useState(false)
+    const [authError, setAuthError] = useState('')
     const [state, setState] = useState<LotteryState | null>(null)
     const [activeToast, setActiveToast] = useState<ToastItem | null>(null)
     const [toastQueue, setToastQueue] = useState<ToastItem[]>([])
     const [spinning, setSpinning] = useState(false)
     const [showTask, setShowTask] = useState(false)
     const [showResult, setShowResult] = useState(false)
+    const [showContract, setShowContract] = useState(false)
     const [showAdmin, setShowAdmin] = useState(false)
     const [resultList, setResultList] = useState<string[]>([])
     const [showDrawOverlay, setShowDrawOverlay] = useState(false)
@@ -95,6 +120,9 @@ export default function Page() {
     const [theme, setTheme] = useState<'light' | 'dark'>('dark')
     const [dailySubmittingId, setDailySubmittingId] = useState<string | null>(null)
     const [specialSubmittingId, setSpecialSubmittingId] = useState<string | null>(null)
+    const [contractApplying, setContractApplying] = useState(false)
+    const [contractRespondingId, setContractRespondingId] = useState<number | null>(null)
+    const [contractTargetNickname, setContractTargetNickname] = useState('')
     const [adminBusy, setAdminBusy] = useState(false)
     const [historyPage, setHistoryPage] = useState(1)
 
@@ -236,6 +264,7 @@ export default function Page() {
         adminJsonValidity.coinExchanges
 
     const syncState = async () => {
+        if (!currentUser?.userId) return
         const data = await fetchJson('/api/lottery/state')
         if (!data.ok) {
             showHint(data.message || '加载失败', 'error')
@@ -244,7 +273,19 @@ export default function Page() {
         setState(data.state || null)
     }
 
-    useAsyncEffect(syncState, [])
+    useEffect(() => {
+        if (typeof window === 'undefined') return
+        const userId = (localStorage.getItem(USER_TOKEN_STORAGE_KEY) || localStorage.getItem(USER_ID_STORAGE_KEY) || '').trim()
+        const username = (localStorage.getItem(USER_NAME_STORAGE_KEY) || '').trim()
+        if (!userId || !username) return
+        cachedUserId = userId
+        localStorage.setItem(USER_TOKEN_STORAGE_KEY, userId)
+        localStorage.setItem(USER_ID_STORAGE_KEY, userId)
+        setCurrentUser({ userId, username })
+        setAuthNameInput(username)
+    }, [])
+
+    useAsyncEffect(syncState, [currentUser?.userId])
 
     useEffect(() => {
         return () => {
@@ -273,12 +314,12 @@ export default function Page() {
     }, [theme])
 
     useEffect(() => {
-        const hasModal = showAdmin || showTask || showResult || showDrawOverlay || showBackpack || showHistoryModal || showExchangeModal
+        const hasModal = showAdmin || showTask || showResult || showDrawOverlay || showBackpack || showHistoryModal || showExchangeModal || showContract
         document.body.style.overflow = hasModal ? 'hidden' : ''
         return () => {
             document.body.style.overflow = ''
         }
-    }, [showAdmin, showTask, showResult, showDrawOverlay, showBackpack, showHistoryModal, showExchangeModal])
+    }, [showAdmin, showTask, showResult, showDrawOverlay, showBackpack, showHistoryModal, showExchangeModal, showContract])
 
     useEffect(() => {
         if (!activeToast && toastQueue.length > 0) {
@@ -497,6 +538,8 @@ export default function Page() {
             const confirmed = window.confirm('确认已完成今日签到？')
             if (!confirmed) return
             payload = { confirmCheckIn: true }
+        } else if (task.mode === 'draw') {
+            payload = { drawDone: true }
         } else {
             const evidence = window.prompt('请输入任务完成说明（用于审核/条件判断）：', '')?.trim() || ''
             if (evidence.length < 2) {
@@ -533,6 +576,8 @@ export default function Page() {
             const confirmed = window.confirm('确认已完成今日签到？')
             if (!confirmed) return
             payload = { confirmCheckIn: true }
+        } else if (task.mode === 'draw') {
+            payload = { drawDone: true }
         } else {
             const evidence = window.prompt('请输入任务完成说明（用于审核/条件判断）：', '')?.trim() || ''
             if (evidence.length < 2) {
@@ -553,6 +598,46 @@ export default function Page() {
             return
         }
         showHint(data.message || '特殊任务完成', 'success')
+        if (data.state) setState(data.state)
+    }
+
+    const submitContractApply = async () => {
+        if (contractApplying) return
+        const nickname = contractTargetNickname.trim()
+        if (!nickname) {
+            showHint('请输入对方昵称', 'error')
+            return
+        }
+        setContractApplying(true)
+        const data = await fetchJson('/api/contract/request', {
+            method: 'POST',
+            body: JSON.stringify({ nickname }),
+        })
+        setContractApplying(false)
+        if (!data.ok) {
+            showHint(data.message || '契约申请失败', 'error')
+            if (data.state) setState(data.state)
+            return
+        }
+        setContractTargetNickname('')
+        showHint(data.message || '契约申请已发送', 'info')
+        if (data.state) setState(data.state)
+    }
+
+    const respondContractRequest = async (requestId: number, action: 'accept' | 'reject') => {
+        if (contractRespondingId) return
+        setContractRespondingId(requestId)
+        const data = await fetchJson('/api/contract/respond', {
+            method: 'POST',
+            body: JSON.stringify({ requestId, action }),
+        })
+        setContractRespondingId(null)
+        if (!data.ok) {
+            showHint(data.message || '处理失败', 'error')
+            if (data.state) setState(data.state)
+            return
+        }
+        showHint(data.message || (action === 'accept' ? '已接受申请' : '已拒绝申请'), 'info')
         if (data.state) setState(data.state)
     }
 
@@ -695,10 +780,48 @@ export default function Page() {
         setAdminConfigDrafts((prev) => ({ ...prev, [field]: value }))
     }
 
+    const submitUserAuth = async () => {
+        if (authBusy) return
+        const username = authNameInput
+        if (!username.trim()) {
+            setAuthError('请输入你的昵称')
+            return
+        }
+        setAuthBusy(true)
+        setAuthError('')
+        const data = await fetchJson('/api/auth/login', {
+            method: 'POST',
+            body: JSON.stringify({ username }),
+        })
+        setAuthBusy(false)
+        if (!data.ok || !data.userId || !data.username) {
+            setAuthError(data.message || '注册失败')
+            return
+        }
+        const token = (data.token || data.userId || '').trim()
+        cachedUserId = token
+        localStorage.setItem(USER_TOKEN_STORAGE_KEY, token)
+        localStorage.setItem(USER_ID_STORAGE_KEY, token)
+        localStorage.setItem(USER_NAME_STORAGE_KEY, data.username)
+        setCurrentUser({ userId: token, username: data.username })
+        showHint(data.message || '注册成功', 'info')
+    }
+
+    const switchUser = () => {
+        localStorage.removeItem(USER_TOKEN_STORAGE_KEY)
+        localStorage.removeItem(USER_ID_STORAGE_KEY)
+        localStorage.removeItem(USER_NAME_STORAGE_KEY)
+        cachedUserId = ''
+        setCurrentUser(null)
+        setState(null)
+        setAuthError('')
+    }
+
     useEffect(() => {
         const onEsc = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return
             if (showAdmin) setShowAdmin(false)
+            else if (showContract) setShowContract(false)
             else if (showBackpack) setShowBackpack(false)
             else if (showHistoryModal) setShowHistoryModal(false)
             else if (showExchangeModal) setShowExchangeModal(false)
@@ -707,16 +830,14 @@ export default function Page() {
         }
         window.addEventListener('keydown', onEsc)
         return () => window.removeEventListener('keydown', onEsc)
-    }, [showAdmin, showBackpack, showHistoryModal, showExchangeModal, showTask, showResult])
+    }, [showAdmin, showContract, showBackpack, showHistoryModal, showExchangeModal, showTask, showResult])
 
     const adminLoggedIn = !!adminToken && !!adminConfig
     const remaining = state?.remainingChances ?? 0
     const taskBonusUsed = state?.bonusChances ?? 0
     const taskBonusMax = state?.maxTaskBonus ?? 0
     const taskBonusPercent = taskBonusMax > 0 ? Math.min(100, Math.round((taskBonusUsed / taskBonusMax) * 100)) : 0
-    const specialProgress = Math.min(state?.dailyTaskCount ?? 0, state?.specialUnlockTarget ?? 0)
-    const specialTarget = state?.specialUnlockTarget ?? 0
-    const specialUnlocked = state?.specialUnlocked ?? false
+    const contractBound = state?.contractBound ?? false
     const canSingleDraw = !!state && remaining >= 1 && !spinning
     const canFiveDraw = !!state && remaining >= 5 && !spinning
     const historyItems = [...(state?.results ?? [])].reverse()
@@ -755,10 +876,11 @@ export default function Page() {
         return `【奖品说明】${item.name}：${exchange}`
     })
     const policyRules = [
-        '本活动采用系统随机抽取机制；参与即视为同意本活动规则及相关说明。',
-        '每位用户每日可获得基础抽奖次数，额外次数以任务奖励与系统发放结果为准。',
-        '抽奖结果以系统实时展示与记录为准；若因网络波动导致延迟，请以最终记录为准。',
-        '金币仅限在活动页面内兑换指定权益，不支持提现、转让或折现。',
+        '注册后可在右上角【🤝 契约】中输入另一名用户昵称发起绑定申请。',
+        '被申请人会在契约弹窗中收到申请，可选择接受或拒绝。',
+        '未绑定契约：每天发放 50 次测试抽奖，仅作展示，奖品不会进入背包。',
+        '已绑定契约：解锁契约任务，并启用真实抽奖与奖品入包记录。',
+        '当前任务仅开放：签到任务、抽奖任务；未绑定时契约任务显示锁定中。',
         '实物或权益类奖品请在通知期限内完成确认，逾期未确认视为自动放弃。',
         '如遇不可抗力、系统升级或法律法规调整，主办方有权在合法范围内进行规则优化并公示。',
     ]
@@ -769,7 +891,37 @@ export default function Page() {
             ? '正在处理本次抽奖，请稍候...'
             : remaining <= 0
                 ? '今日次数已用完，先完成任务再来吧'
-                : `当前可用 ${remaining} 次，推荐先单抽试试手气`
+                : state?.testMode
+                    ? `当前测试模式可用 ${remaining} 次（奖品不会进背包）`
+                    : `当前可用 ${remaining} 次，推荐先单抽试试手气`
+
+    if (!currentUser) {
+        return (
+            <div className="crystal-shell">
+                <div className="draw-overlay" style={{ opacity: 1 }}>
+                    <div className="draw-overlay-card" style={{ maxWidth: 520 }}>
+                        <h2>欢迎来到缘</h2>
+                        <p className="sub-tip">首次进入请先注册。请输入你的昵称。</p>
+                        <input
+                            className="input"
+                            placeholder="请输入你的昵称"
+                            value={authNameInput}
+                            onChange={(e) => setAuthNameInput(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') void submitUserAuth()
+                            }}
+                        />
+                        {authError && <p className="small-tip error-tip">{authError}</p>}
+                        <div className="draw-overlay-actions">
+                            <button className="btn primary" onClick={submitUserAuth} disabled={authBusy}>
+                                {authBusy ? '注册中...' : '注册并进入首页'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        )
+    }
 
     return (
         <div className="crystal-shell">
@@ -777,10 +929,12 @@ export default function Page() {
                 theme={theme}
                 onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
                 onOpenTask={() => setShowTask(true)}
+                onOpenContract={() => setShowContract(true)}
                 onOpenAdmin={() => setShowAdmin(true)}
                 remainingChances={state?.remainingChances ?? 0}
                 bonusChances={state?.bonusChances ?? 0}
                 maxTaskBonus={state?.maxTaskBonus ?? 0}
+                contractBound={contractBound}
             />
 
             <div className="toast-layer" aria-live="polite" aria-atomic="true">
@@ -837,14 +991,12 @@ export default function Page() {
                     <article className="kpi-card">
                         <div className="kpi-top">
                             <span className="kpi-icon" aria-hidden>
-                                🔓
+                                🤝
                             </span>
-                            <span>特殊解锁</span>
+                            <span>契约状态</span>
                         </div>
-                        <strong>
-                            {specialProgress}/{specialTarget}
-                        </strong>
-                        <small>{specialUnlocked ? '已解锁' : '未解锁'}</small>
+                        <strong>{contractBound ? '已绑定' : '未绑定'}</strong>
+                        <small>{contractBound ? `契约对象：${state?.contractPartnerName || '已绑定'}` : ''}</small>
                     </article>
                 </section>
                 <section className="home-layout" aria-label="首页主内容布局">
@@ -861,7 +1013,7 @@ export default function Page() {
                             </button>
                         </div>
 
-                        {/* <p className="action-helper">{drawHelper}</p> */}
+                        <p className="action-helper">{drawHelper}</p>
 
                         <section className="rules-panel" aria-label="活动规则">
                             <div className="history-head">
@@ -877,6 +1029,39 @@ export default function Page() {
 
                 </section>
             </main>
+
+            <AnimatePresence>
+                {showContract && (
+                    <AnimatedModal onClose={() => setShowContract(false)}>
+                        <div className="modal-head">
+                            <h2>契约绑定</h2>
+                        </div>
+                        {!state?.contractBound && (
+                            <div className="form-grid">
+                                <input
+                                    className="input"
+                                    placeholder="输入对方昵称"
+                                    value={contractTargetNickname}
+                                    onChange={(e) => setContractTargetNickname(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') void submitContractApply()
+                                    }}
+                                />
+                                <button className="btn primary" disabled={contractApplying} onClick={submitContractApply}>
+                                    {contractApplying ? '发送中...' : '发起契约申请'}
+                                </button>
+                            </div>
+                        )}
+
+
+                        <div className="modal-actions">
+                            <button className="btn" onClick={() => setShowContract(false)}>
+                                关闭
+                            </button>
+                        </div>
+                    </AnimatedModal>
+                )}
+            </AnimatePresence>
 
             <AnimatePresence>
                 {showBackpack && (
@@ -1045,7 +1230,7 @@ export default function Page() {
                         <div className="modal-head">
                             <h2>任务套餐</h2>
                         </div>
-                        <p className="sub-tip">完成任务可累计赠送抽奖次数（每日最多 +10 次）</p>
+                        <p className="sub-tip">完成任务可累计赠送抽奖次数（未绑定时仅开放签到与抽奖任务）</p>
                         <TaskSections
                             state={state}
                             onCompleteDaily={completeDaily}

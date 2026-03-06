@@ -3,7 +3,7 @@ import type { Metadata } from 'next'
 import { GlobalScrollbar } from '../components/GlobalScrollbar'
 
 export const metadata: Metadata = {
-    title: '恋爱抽奖机',
+    title: '缘',
     description: '给宝贝的专属抽奖机',
 }
 

@@ -1,3 +1,7 @@
+import type { ResultSetHeader, RowDataPacket } from 'mysql2/promise';
+import { getMysqlPool } from '@/lib/mysql';
+import { getContractInfo, type ContractRequestView } from '@/lib/user-auth';
+
 export type PrizeTier = 'lucky' | 'heart' | 'rare' | 'ultimate';
 export type Prize = {
     name: string;
@@ -10,7 +14,7 @@ export type Prize = {
     coins?: number;
 };
 export type CoinExchange = { name: string; cost: number; description?: string };
-export type TaskCompleteMode = 'checkin' | 'verify';
+export type TaskCompleteMode = 'checkin' | 'verify' | 'draw';
 export type DailyTaskTemplate = { id: string; title: string; reward: number; maxTimes: number; mode: TaskCompleteMode };
 export type SpecialTaskTemplate = { id: string; title: string; reward: number; mode: TaskCompleteMode };
 export type DailyTask = DailyTaskTemplate & { doneTimes: number };
@@ -31,6 +35,7 @@ export type LotteryState = {
     usedChances: number;
     bonusChances: number;
     dailyTaskCount: number;
+    dailyDrawCount: number;
     dailyTasks: DailyTask[];
     specialTasks: SpecialTask[];
     results: string[];
@@ -52,6 +57,12 @@ export type PublicState = {
     specialTasks: SpecialTask[];
     results: string[];
     coins: number;
+    contractBound: boolean;
+    contractPartnerName: string | null;
+    contractIncomingRequests: ContractRequestView[];
+    contractOutgoingRequests: ContractRequestView[];
+    testMode: boolean;
+    canSaveToBackpack: boolean;
 };
 
 export type ApiResponse = {
@@ -67,10 +78,11 @@ export type ApiResponse = {
 
 const adminUsername = 'root';
 let adminPassword = 'root';
+let adminPasswordLoaded = false;
 const activeAdminTokens = new Map<string, number>();
 const adminSessionTtlMs = 2 * 60 * 60 * 1000;
 
-let config: LotteryConfig = {
+const defaultConfig: LotteryConfig = {
     baseDailyChances: 20,
     maxTaskBonus: 10,
     specialUnlockTarget: 6,
@@ -99,18 +111,16 @@ let config: LotteryConfig = {
     ],
     dailyTasks: [
         { id: 'd1', title: '每日签到', reward: 1, maxTimes: 1, mode: 'checkin' },
-        { id: 'd2', title: '夸夸女朋友一次', reward: 1, maxTimes: 3, mode: 'verify' },
-        { id: 'd3', title: '分享今天最开心的事', reward: 1, maxTimes: 3, mode: 'verify' },
-        { id: 'd4', title: '发一张今日照片', reward: 1, maxTimes: 2, mode: 'verify' },
+        { id: 'd2', title: '完成1次抽奖', reward: 1, maxTimes: 1, mode: 'draw' },
     ],
     specialTasks: [
-        { id: 's1', title: '准备一个小惊喜', reward: 3, mode: 'verify' },
-        { id: 's2', title: '完成一次双人运动', reward: 2, mode: 'verify' },
-        { id: 's3', title: '策划下一次约会', reward: 3, mode: 'verify' },
+        { id: 's1', title: '契约互动打卡', reward: 2, mode: 'verify' },
     ],
 };
 
-let state: LotteryState = getInitialState();
+let config: LotteryConfig = cloneConfig(defaultConfig);
+let configLoaded = false;
+let schemaReady = false;
 let mutationQueue: Promise<void> = Promise.resolve();
 
 function todayKey(): string {
@@ -121,12 +131,25 @@ function todayKey(): string {
     return `${y}-${m}-${d}`;
 }
 
+function cloneConfig(source: LotteryConfig): LotteryConfig {
+    return {
+        baseDailyChances: source.baseDailyChances,
+        maxTaskBonus: source.maxTaskBonus,
+        specialUnlockTarget: source.specialUnlockTarget,
+        prizePool: source.prizePool.map((item) => ({ ...item })),
+        coinExchanges: source.coinExchanges.map((item) => ({ ...item })),
+        dailyTasks: source.dailyTasks.map((item) => ({ ...item })),
+        specialTasks: source.specialTasks.map((item) => ({ ...item })),
+    };
+}
+
 function getInitialState(): LotteryState {
     return {
         date: todayKey(),
         usedChances: 0,
         bonusChances: 0,
         dailyTaskCount: 0,
+        dailyDrawCount: 0,
         dailyTasks: config.dailyTasks.map((t) => ({ ...t, doneTimes: 0 })),
         specialTasks: config.specialTasks.map((t) => ({ ...t, done: false })),
         results: [],
@@ -134,22 +157,21 @@ function getInitialState(): LotteryState {
     };
 }
 
-async function readState(): Promise<LotteryState> {
-    if (state.date !== todayKey()) {
-        state = getInitialState();
+function normalizeUserId(userId: string): string {
+    const normalized = String(userId || '').trim().replace(/[^\w:.@-]/g, '').slice(0, 64);
+    return normalized || 'guest';
+}
+
+function getErrorMessage(error: unknown): string {
+    const message = error instanceof Error ? error.message : '未知错误';
+    if (/MySQL 未配置/.test(message)) return message;
+    return `数据库操作失败：${message}`;
+}
+
+function remaining(current: LotteryState, contractBound: boolean): number {
+    if (!contractBound) {
+        return Math.max(0, 50 - current.usedChances);
     }
-    return state;
-}
-
-async function writeState(next: LotteryState): Promise<void> {
-    state = next;
-}
-
-function isSpecialUnlocked(current: LotteryState): boolean {
-    return current.dailyTaskCount >= config.specialUnlockTarget;
-}
-
-function remaining(current: LotteryState): number {
     return Math.max(0, config.baseDailyChances + current.bonusChances - current.usedChances);
 }
 
@@ -192,7 +214,9 @@ function pickPrize(): Prize {
     return config.prizePool[config.prizePool.length - 1];
 }
 
-function toResponse(current: LotteryState, message?: string, drawResults: string[] = []): ApiResponse {
+async function toResponse(current: LotteryState, userId: string, message?: string, drawResults: string[] = []): Promise<ApiResponse> {
+    const contract = await getContractInfo(userId);
+    const contractBound = contract.bound;
     return {
         ok: true,
         message,
@@ -205,13 +229,19 @@ function toResponse(current: LotteryState, message?: string, drawResults: string
             coinExchanges: config.coinExchanges,
             usedChances: current.usedChances,
             bonusChances: current.bonusChances,
-            remainingChances: remaining(current),
+            remainingChances: remaining(current, contractBound),
             dailyTaskCount: current.dailyTaskCount,
-            dailyTasks: current.dailyTasks,
-            specialUnlocked: isSpecialUnlocked(current),
+            dailyTasks: current.dailyTasks.slice(0, 2),
+            specialUnlocked: contractBound,
             specialTasks: current.specialTasks,
             results: current.results.slice(),
             coins: current.coins,
+            contractBound,
+            contractPartnerName: contract.partnerUsername,
+            contractIncomingRequests: contract.incomingRequests,
+            contractOutgoingRequests: contract.outgoingRequests,
+            testMode: !contractBound,
+            canSaveToBackpack: contractBound,
         },
     };
 }
@@ -277,7 +307,7 @@ function sanitizeDailyTasks(value: unknown): DailyTaskTemplate[] | null {
         const reward = Number(record.reward);
         const maxTimes = Number(record.maxTimes);
         const modeRaw = String(record.mode || '').trim().toLowerCase();
-        const mode: TaskCompleteMode = modeRaw === 'checkin' ? 'checkin' : /签到/.test(title) ? 'checkin' : 'verify';
+        const mode: TaskCompleteMode = modeRaw === 'checkin' ? 'checkin' : modeRaw === 'draw' ? 'draw' : /签到/.test(title) ? 'checkin' : /抽奖/.test(title) ? 'draw' : 'verify';
         if (!title || !id || !Number.isFinite(reward) || reward <= 0 || !Number.isFinite(maxTimes) || maxTimes <= 0) {
             return null;
         }
@@ -300,7 +330,7 @@ function sanitizeSpecialTasks(value: unknown): SpecialTaskTemplate[] | null {
         const title = String(record.title || '').trim();
         const reward = Number(record.reward);
         const modeRaw = String(record.mode || '').trim().toLowerCase();
-        const mode: TaskCompleteMode = modeRaw === 'checkin' ? 'checkin' : /签到/.test(title) ? 'checkin' : 'verify';
+        const mode: TaskCompleteMode = modeRaw === 'checkin' ? 'checkin' : modeRaw === 'draw' ? 'draw' : /签到/.test(title) ? 'checkin' : /抽奖/.test(title) ? 'draw' : 'verify';
         if (!title || !id || !Number.isFinite(reward) || reward <= 0) return null;
         if (usedIds.has(id)) return null;
         usedIds.add(id);
@@ -327,6 +357,200 @@ function sanitizeCoinExchanges(value: unknown): CoinExchange[] | null {
     return parsed;
 }
 
+async function ensureSchema(): Promise<void> {
+    if (schemaReady) return;
+    const pool = getMysqlPool();
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS lottery_config (
+            id TINYINT NOT NULL PRIMARY KEY,
+            config_json LONGTEXT NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS lottery_user_state (
+            user_id VARCHAR(64) NOT NULL PRIMARY KEY,
+            state_date VARCHAR(10) NOT NULL,
+            state_json LONGTEXT NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS lottery_settings (
+            setting_key VARCHAR(64) NOT NULL PRIMARY KEY,
+            value_text TEXT NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await pool.query<ResultSetHeader>('INSERT IGNORE INTO lottery_config (id, config_json) VALUES (1, ?)', [JSON.stringify(defaultConfig)]);
+    await pool.query<ResultSetHeader>("INSERT IGNORE INTO lottery_settings (setting_key, value_text) VALUES ('admin_password', 'root')");
+    schemaReady = true;
+}
+
+async function ensureConfigLoaded(): Promise<void> {
+    if (configLoaded) return;
+    await ensureSchema();
+    const pool = getMysqlPool();
+    const [rows] = await pool.query<RowDataPacket[]>('SELECT config_json FROM lottery_config WHERE id = 1 LIMIT 1');
+    const row = rows[0];
+    if (!row) {
+        config = cloneConfig(defaultConfig);
+        configLoaded = true;
+        return;
+    }
+
+    const raw = JSON.parse(String(row.config_json || '{}')) as Partial<LotteryConfig>;
+    const baseDailyChances = Number(raw.baseDailyChances);
+    const maxTaskBonus = Number(raw.maxTaskBonus);
+    const specialUnlockTarget = Number(raw.specialUnlockTarget);
+    const prizePool = sanitizePrizePool(raw.prizePool);
+    const dailyTasks = sanitizeDailyTasks(raw.dailyTasks);
+    const specialTasks = sanitizeSpecialTasks(raw.specialTasks);
+    const coinExchanges = sanitizeCoinExchanges(raw.coinExchanges);
+
+    if (
+        !Number.isFinite(baseDailyChances) ||
+        baseDailyChances < 1 ||
+        !Number.isFinite(maxTaskBonus) ||
+        maxTaskBonus < 1 ||
+        !Number.isFinite(specialUnlockTarget) ||
+        specialUnlockTarget < 1 ||
+        !prizePool ||
+        !dailyTasks ||
+        !specialTasks ||
+        !coinExchanges
+    ) {
+        config = cloneConfig(defaultConfig);
+    } else {
+        config = {
+            baseDailyChances: Math.floor(baseDailyChances),
+            maxTaskBonus: Math.floor(maxTaskBonus),
+            specialUnlockTarget: Math.floor(specialUnlockTarget),
+            prizePool,
+            coinExchanges,
+            dailyTasks,
+            specialTasks,
+        };
+    }
+
+    configLoaded = true;
+}
+
+async function ensureAdminPasswordLoaded(): Promise<void> {
+    if (adminPasswordLoaded) return;
+    await ensureSchema();
+    const pool = getMysqlPool();
+    const [rows] = await pool.query<RowDataPacket[]>("SELECT value_text FROM lottery_settings WHERE setting_key = 'admin_password' LIMIT 1");
+    const row = rows[0];
+    adminPassword = String(row?.value_text || 'root');
+    adminPasswordLoaded = true;
+}
+
+function normalizeStateFromRecord(raw: unknown, fallbackDate: string): LotteryState {
+    const current = getInitialState();
+    if (!raw || typeof raw !== 'object') {
+        current.date = fallbackDate;
+        return current;
+    }
+
+    const record = raw as Record<string, unknown>;
+    current.date = fallbackDate;
+    current.usedChances = Math.max(0, Math.floor(Number(record.usedChances || 0)));
+    current.bonusChances = Math.max(0, Math.floor(Number(record.bonusChances || 0)));
+    current.dailyTaskCount = Math.max(0, Math.floor(Number(record.dailyTaskCount || 0)));
+    current.dailyDrawCount = Math.max(0, Math.floor(Number(record.dailyDrawCount || 0)));
+    current.coins = Math.max(0, Math.floor(Number(record.coins || 0)));
+
+    const dailyRaw = Array.isArray(record.dailyTasks) ? record.dailyTasks : [];
+    const dailyMap = new Map<string, number>();
+    for (const item of dailyRaw) {
+        if (!item || typeof item !== 'object') continue;
+        const row = item as Record<string, unknown>;
+        const id = String(row.id || '').trim();
+        if (!id) continue;
+        const doneTimes = Math.max(0, Math.floor(Number(row.doneTimes || 0)));
+        dailyMap.set(id, doneTimes);
+    }
+    current.dailyTasks = config.dailyTasks.map((task) => ({
+        ...task,
+        doneTimes: Math.min(task.maxTimes, Math.max(0, dailyMap.get(task.id) ?? 0)),
+    }));
+
+    const specialRaw = Array.isArray(record.specialTasks) ? record.specialTasks : [];
+    const specialMap = new Map<string, boolean>();
+    for (const item of specialRaw) {
+        if (!item || typeof item !== 'object') continue;
+        const row = item as Record<string, unknown>;
+        const id = String(row.id || '').trim();
+        if (!id) continue;
+        specialMap.set(id, Boolean(row.done));
+    }
+    current.specialTasks = config.specialTasks.map((task) => ({ ...task, done: Boolean(specialMap.get(task.id)) }));
+
+    const results = Array.isArray(record.results)
+        ? record.results.map((item) => String(item || '').trim()).filter((item) => item.length > 0)
+        : [];
+    current.results = results.slice(-200);
+
+    return current;
+}
+
+async function readState(userId: string): Promise<LotteryState> {
+    await ensureConfigLoaded();
+    const normalizedUserId = normalizeUserId(userId);
+    const pool = getMysqlPool();
+    const [rows] = await pool.query<RowDataPacket[]>(
+        'SELECT state_date, state_json FROM lottery_user_state WHERE user_id = ? LIMIT 1',
+        [normalizedUserId],
+    );
+    const today = todayKey();
+    const row = rows[0];
+    if (!row) {
+        const initial = getInitialState();
+        await writeState(normalizedUserId, initial);
+        return initial;
+    }
+
+    const rowDate = String(row.state_date || '');
+    if (rowDate !== today) {
+        const reset = getInitialState();
+        await writeState(normalizedUserId, reset);
+        return reset;
+    }
+
+    const parsed = JSON.parse(String(row.state_json || '{}')) as unknown;
+    return normalizeStateFromRecord(parsed, today);
+}
+
+async function writeState(userId: string, next: LotteryState): Promise<void> {
+    await ensureSchema();
+    const normalizedUserId = normalizeUserId(userId);
+    const pool = getMysqlPool();
+    await pool.query<ResultSetHeader>(
+        `
+        INSERT INTO lottery_user_state (user_id, state_date, state_json)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+            state_date = VALUES(state_date),
+            state_json = VALUES(state_json)
+        `,
+        [normalizedUserId, next.date, JSON.stringify(next)],
+    );
+}
+
+async function saveConfig(next: LotteryConfig): Promise<void> {
+    await ensureSchema();
+    const pool = getMysqlPool();
+    await pool.query<ResultSetHeader>(
+        `
+        INSERT INTO lottery_config (id, config_json)
+        VALUES (1, ?)
+        ON DUPLICATE KEY UPDATE config_json = VALUES(config_json)
+        `,
+        [JSON.stringify(next)],
+    );
+}
+
 type TaskSubmitPayload = {
     confirmCheckIn: boolean;
     evidence: string;
@@ -343,127 +567,186 @@ function parseTaskSubmitPayload(payload?: unknown): TaskSubmitPayload {
     };
 }
 
-export async function getPublicState(): Promise<ApiResponse> {
-    const current = await readState();
-    await writeState(current);
-    return toResponse(current);
+export async function getPublicState(userId: string): Promise<ApiResponse> {
+    try {
+        const current = await readState(userId);
+        return await toResponse(current, userId);
+    } catch (error) {
+        return { ok: false, message: getErrorMessage(error) };
+    }
 }
 
-export async function completeDailyTask(taskId: string, payload?: unknown): Promise<ApiResponse> {
+export async function completeDailyTask(taskId: string, userId: string, payload?: unknown): Promise<ApiResponse> {
     return runExclusive(async () => {
-        const current = await readState();
-        const task = current.dailyTasks.find((item) => item.id === taskId);
-        if (!task) return { ok: false, message: '任务不存在' };
-        const submit = parseTaskSubmitPayload(payload);
-        if (task.mode === 'checkin') {
-            if (!submit.confirmCheckIn) {
-                return { ok: false, message: '签到任务请点击“签到确认”后再提交', state: toResponse(current).state };
+        try {
+            const current = await readState(userId);
+            const task = current.dailyTasks.slice(0, 2).find((item) => item.id === taskId);
+            if (!task) return { ok: false, message: '任务不存在' };
+            const submit = parseTaskSubmitPayload(payload);
+            if (task.mode === 'checkin') {
+                if (!submit.confirmCheckIn) {
+                    const state = (await toResponse(current, userId)).state;
+                    return { ok: false, message: '签到任务请点击“签到确认”后再提交', state };
+                }
+            } else if (task.mode === 'draw') {
+                if (current.dailyDrawCount < 1) {
+                    const state = (await toResponse(current, userId)).state;
+                    return { ok: false, message: '请先完成至少 1 次抽奖，再提交该任务', state };
+                }
+            } else if (submit.evidence.length < 2) {
+                const state = (await toResponse(current, userId)).state;
+                return { ok: false, message: '该任务需提交完成说明（审核/条件判断）后才能成功', state };
             }
-        } else if (submit.evidence.length < 2) {
-            return { ok: false, message: '该任务需提交完成说明（审核/条件判断）后才能成功', state: toResponse(current).state };
+            if (task.doneTimes >= task.maxTimes) {
+                const state = (await toResponse(current, userId)).state;
+                return { ok: false, message: '该日常任务今日次数已达上限', state };
+            }
+            task.doneTimes += 1;
+            current.dailyTaskCount += 1;
+            const gain = addBonus(current, task.reward);
+            pushHistory(current, `任务完成：${task.title}，获得 +${gain} 次抽奖机会`);
+            await writeState(userId, current);
+            const msg = gain > 0 ? `完成成功，+${gain} 次` : '完成成功，今日任务赠送次数已达上限';
+            return await toResponse(current, userId, msg);
+        } catch (error) {
+            return { ok: false, message: getErrorMessage(error) };
         }
-        if (task.doneTimes >= task.maxTimes) {
-            return { ok: false, message: '该日常任务今日次数已达上限', state: toResponse(current).state };
-        }
-        task.doneTimes += 1;
-        current.dailyTaskCount += 1;
-        const gain = addBonus(current, task.reward);
-        pushHistory(current, `任务完成：${task.title}，获得 +${gain} 次抽奖机会`);
-        await writeState(current);
-        const msg = gain > 0 ? `完成成功，+${gain} 次` : '完成成功，今日任务赠送次数已达上限';
-        return toResponse(current, msg);
     });
 }
 
-export async function completeSpecialTask(taskId: string, payload?: unknown): Promise<ApiResponse> {
+export async function completeSpecialTask(taskId: string, userId: string, payload?: unknown): Promise<ApiResponse> {
     return runExclusive(async () => {
-        const current = await readState();
-        if (!isSpecialUnlocked(current)) {
-            return { ok: false, message: '特殊任务尚未解锁', state: toResponse(current).state };
-        }
-        const task = current.specialTasks.find((item) => item.id === taskId);
-        if (!task) return { ok: false, message: '任务不存在' };
-        const submit = parseTaskSubmitPayload(payload);
-        if (task.mode === 'checkin') {
-            if (!submit.confirmCheckIn) {
-                return { ok: false, message: '签到任务请点击“签到确认”后再提交', state: toResponse(current).state };
+        try {
+            const current = await readState(userId);
+            const contract = await getContractInfo(userId);
+            if (!contract.bound) {
+                const state = (await toResponse(current, userId)).state;
+                return { ok: false, message: '未绑定契约，契约任务处于锁定中', state };
             }
-        } else if (submit.evidence.length < 2) {
-            return { ok: false, message: '该任务需提交完成说明（审核/条件判断）后才能成功', state: toResponse(current).state };
+            const task = current.specialTasks.find((item) => item.id === taskId);
+            if (!task) return { ok: false, message: '任务不存在' };
+            const submit = parseTaskSubmitPayload(payload);
+            if (task.mode === 'checkin') {
+                if (!submit.confirmCheckIn) {
+                    const state = (await toResponse(current, userId)).state;
+                    return { ok: false, message: '签到任务请点击“签到确认”后再提交', state };
+                }
+            } else if (task.mode === 'draw') {
+                if (current.dailyDrawCount < 1) {
+                    const state = (await toResponse(current, userId)).state;
+                    return { ok: false, message: '请先完成至少 1 次抽奖，再提交该任务', state };
+                }
+            } else if (submit.evidence.length < 2) {
+                const state = (await toResponse(current, userId)).state;
+                return { ok: false, message: '该任务需提交完成说明（审核/条件判断）后才能成功', state };
+            }
+            if (task.done) {
+                const state = (await toResponse(current, userId)).state;
+                return { ok: false, message: '该契约任务已完成', state };
+            }
+            task.done = true;
+            const gain = addBonus(current, task.reward);
+            pushHistory(current, `契约任务完成：${task.title}，获得 +${gain} 次抽奖机会`);
+            await writeState(userId, current);
+            const msg = gain > 0 ? `完成成功，+${gain} 次` : '完成成功，今日任务赠送次数已达上限';
+            return await toResponse(current, userId, msg);
+        } catch (error) {
+            return { ok: false, message: getErrorMessage(error) };
         }
-        if (task.done) {
-            return { ok: false, message: '该特殊任务已完成', state: toResponse(current).state };
-        }
-        task.done = true;
-        const gain = addBonus(current, task.reward);
-        pushHistory(current, `特殊任务完成：${task.title}，获得 +${gain} 次抽奖机会`);
-        await writeState(current);
-        const msg = gain > 0 ? `完成成功，+${gain} 次` : '完成成功，今日任务赠送次数已达上限';
-        return toResponse(current, msg);
     });
 }
 
-export async function draw(times: number): Promise<ApiResponse> {
+export async function draw(times: number, userId: string): Promise<ApiResponse> {
     return runExclusive(async () => {
-        const current = await readState();
-        if (!Number.isInteger(times) || (times !== 1 && times !== 5)) {
-            return { ok: false, message: '仅支持单抽(1)或五连抽(5)' };
+        try {
+            const current = await readState(userId);
+            const contract = await getContractInfo(userId);
+            const realMode = contract.bound;
+            if (!Number.isInteger(times) || (times !== 1 && times !== 5)) {
+                return { ok: false, message: '仅支持单抽(1)或五连抽(5)' };
+            }
+            const remain = remaining(current, realMode);
+            if (remain < times) {
+                const state = (await toResponse(current, userId)).state;
+                return { ok: false, message: `次数不足，当前剩余 ${remain} 次`, state };
+            }
+            current.usedChances += times;
+            current.dailyDrawCount += times;
+            const drawResults: string[] = [];
+            let totalCoins = 0;
+            for (let i = 0; i < times; i += 1) {
+                const prize = pickPrize();
+                const text = `${prize.rare ? '✨稀有✨ ' : ''}${prize.name}`;
+                drawResults.push(text);
+                if (realMode) {
+                    const coinsGained = Math.max(0, Math.floor(Number(prize.coins || 0)));
+                    if (coinsGained > 0) {
+                        current.coins += coinsGained;
+                        totalCoins += coinsGained;
+                        pushHistory(current, `抽中：${text}，获得 ${coinsGained} 枚金币`);
+                    } else {
+                        pushHistory(current, `抽中：${text}`);
+                    }
+                }
+            }
+            await writeState(userId, current);
+            const summary = realMode
+                ? totalCoins > 0
+                    ? `已完成 ${times} 抽，获得 ${totalCoins} 枚金币`
+                    : `已完成 ${times} 抽，本次未获得金币`
+                : `测试抽奖完成（${times} 抽），奖品仅预览不会进入背包`;
+            return await toResponse(current, userId, summary, drawResults);
+        } catch (error) {
+            return { ok: false, message: getErrorMessage(error) };
         }
-        const remain = remaining(current);
-        if (remain < times) {
-            return { ok: false, message: `次数不足，当前剩余 ${remain} 次`, state: toResponse(current).state };
-        }
-        current.usedChances += times;
-        const drawResults: string[] = [];
-        let totalCoins = 0;
-        for (let i = 0; i < times; i += 1) {
-            const prize = pickPrize();
-            const text = `${prize.rare ? '✨稀有✨ ' : ''}${prize.name}`;
-            drawResults.push(text);
-            const coinsGained = Math.max(0, Math.floor(Number(prize.coins || 0)));
-            if (coinsGained > 0) {
-                current.coins += coinsGained;
-                totalCoins += coinsGained;
-                pushHistory(current, `抽中：${text}，获得 ${coinsGained} 枚金币`);
+    });
+}
+
+export async function exchangeCoins(exchangeIndex: number, userId: string): Promise<ApiResponse> {
+    return runExclusive(async () => {
+        try {
+            const current = await readState(userId);
+            const contract = await getContractInfo(userId);
+            if (!contract.bound) {
+                const state = (await toResponse(current, userId)).state;
+                return { ok: false, message: '未绑定契约时金币兑换不可用', state };
+            }
+            if (exchangeIndex < 0 || exchangeIndex >= config.coinExchanges.length) {
+                const state = (await toResponse(current, userId)).state;
+                return { ok: false, message: '兑换选项不存在', state };
+            }
+            const exchange = config.coinExchanges[exchangeIndex];
+            if (current.coins < exchange.cost) {
+                const state = (await toResponse(current, userId)).state;
+                return { ok: false, message: `金币不足，需要 ${exchange.cost} 枚金币，当前 ${current.coins} 枚`, state };
+            }
+            current.coins -= exchange.cost;
+            if (exchange.name === '额外抽奖机会') {
+                current.bonusChances += 1;
+                pushHistory(current, `兑换：${exchange.name}，消耗 ${exchange.cost} 枚金币`);
             } else {
-                pushHistory(current, `抽中：${text}`);
+                pushHistory(current, `兑换：${exchange.name}，消耗 ${exchange.cost} 枚金币`);
             }
+            await writeState(userId, current);
+            return await toResponse(current, userId, `兑换成功：${exchange.name}`);
+        } catch (error) {
+            return { ok: false, message: getErrorMessage(error) };
         }
-        await writeState(current);
-        const summary = totalCoins > 0 ? `已完成 ${times} 抽，获得 ${totalCoins} 枚金币` : `已完成 ${times} 抽，本次未获得金币`;
-        return toResponse(current, summary, drawResults);
-    });
-}
-
-export async function exchangeCoins(exchangeIndex: number): Promise<ApiResponse> {
-    return runExclusive(async () => {
-        const current = await readState();
-        if (exchangeIndex < 0 || exchangeIndex >= config.coinExchanges.length) {
-            return { ok: false, message: '兑换选项不存在', state: toResponse(current).state };
-        }
-        const exchange = config.coinExchanges[exchangeIndex];
-        if (current.coins < exchange.cost) {
-            return { ok: false, message: `金币不足，需要 ${exchange.cost} 枚金币，当前 ${current.coins} 枚`, state: toResponse(current).state };
-        }
-        current.coins -= exchange.cost;
-        if (exchange.name === '额外抽奖机会') {
-            current.bonusChances += 1;
-            pushHistory(current, `兑换：${exchange.name}，消耗 ${exchange.cost} 枚金币`);
-        } else {
-            pushHistory(current, `兑换：${exchange.name}，消耗 ${exchange.cost} 枚金币`);
-        }
-        await writeState(current);
-        return toResponse(current, `兑换成功：${exchange.name}`);
     });
 }
 
 export async function adminLogin(username: string, password: string): Promise<ApiResponse> {
-    if (username !== adminUsername || password !== adminPassword) {
-        return { ok: false, message: '用户名或密码错误' };
+    try {
+        await ensureAdminPasswordLoaded();
+        if (username !== adminUsername || password !== adminPassword) {
+            return { ok: false, message: '用户名或密码错误' };
+        }
+        const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        activeAdminTokens.set(token, Date.now() + adminSessionTtlMs);
+        return { ok: true, message: '登录成功', token, username: adminUsername, expiresInMs: adminSessionTtlMs };
+    } catch (error) {
+        return { ok: false, message: getErrorMessage(error) };
     }
-    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    activeAdminTokens.set(token, Date.now() + adminSessionTtlMs);
-    return { ok: true, message: '登录成功', token, username: adminUsername, expiresInMs: adminSessionTtlMs };
 }
 
 export async function adminLogout(token: string): Promise<ApiResponse> {
@@ -474,7 +757,12 @@ export async function adminLogout(token: string): Promise<ApiResponse> {
 
 export async function getAdminConfig(token: string): Promise<ApiResponse> {
     if (!verifyToken(token)) return unauthorized();
-    return { ok: true, username: adminUsername, config };
+    try {
+        await ensureConfigLoaded();
+        return { ok: true, username: adminUsername, config };
+    } catch (error) {
+        return { ok: false, message: getErrorMessage(error) };
+    }
 }
 
 export async function updateAdminConfig(
@@ -482,41 +770,62 @@ export async function updateAdminConfig(
     payload: Partial<LotteryConfig> & { prizePool?: unknown; dailyTasks?: unknown; specialTasks?: unknown; coinExchanges?: unknown },
 ): Promise<ApiResponse> {
     return runExclusive(async () => {
-        if (!verifyToken(token)) return unauthorized();
-        const nextBase = Number(payload.baseDailyChances);
-        const nextBonus = Number(payload.maxTaskBonus);
-        const nextUnlock = Number(payload.specialUnlockTarget);
-        if (!Number.isFinite(nextBase) || nextBase < 1 || !Number.isFinite(nextBonus) || nextBonus < 1 || !Number.isFinite(nextUnlock) || nextUnlock < 1) {
-            return { ok: false, message: '基础配置必须是大于 0 的数字' };
+        try {
+            if (!verifyToken(token)) return unauthorized();
+            await ensureConfigLoaded();
+            const nextBase = Number(payload.baseDailyChances);
+            const nextBonus = Number(payload.maxTaskBonus);
+            const nextUnlock = Number(payload.specialUnlockTarget);
+            if (!Number.isFinite(nextBase) || nextBase < 1 || !Number.isFinite(nextBonus) || nextBonus < 1 || !Number.isFinite(nextUnlock) || nextUnlock < 1) {
+                return { ok: false, message: '基础配置必须是大于 0 的数字' };
+            }
+            const nextPrize = sanitizePrizePool(payload.prizePool);
+            const nextDaily = sanitizeDailyTasks(payload.dailyTasks);
+            const nextSpecial = sanitizeSpecialTasks(payload.specialTasks);
+            const nextExchanges = sanitizeCoinExchanges(payload.coinExchanges);
+            if (!nextPrize || !nextDaily || !nextSpecial || !nextExchanges) {
+                return { ok: false, message: '任务或奖池配置格式不正确（请检查重复ID、空数组、非法概率）' };
+            }
+            config = {
+                baseDailyChances: Math.floor(nextBase),
+                maxTaskBonus: Math.floor(nextBonus),
+                specialUnlockTarget: Math.floor(nextUnlock),
+                prizePool: nextPrize,
+                coinExchanges: nextExchanges,
+                dailyTasks: nextDaily,
+                specialTasks: nextSpecial,
+            };
+            await saveConfig(config);
+            const pool = getMysqlPool();
+            await pool.query<ResultSetHeader>('DELETE FROM lottery_user_state');
+            return { ok: true, message: '配置已保存并生效（已重置所有用户今日进度）', config };
+        } catch (error) {
+            return { ok: false, message: getErrorMessage(error) };
         }
-        const nextPrize = sanitizePrizePool(payload.prizePool);
-        const nextDaily = sanitizeDailyTasks(payload.dailyTasks);
-        const nextSpecial = sanitizeSpecialTasks(payload.specialTasks);
-        const nextExchanges = sanitizeCoinExchanges(payload.coinExchanges);
-        if (!nextPrize || !nextDaily || !nextSpecial || !nextExchanges) {
-            return { ok: false, message: '任务或奖池配置格式不正确（请检查重复ID、空数组、非法概率）' };
-        }
-        config = {
-            baseDailyChances: Math.floor(nextBase),
-            maxTaskBonus: Math.floor(nextBonus),
-            specialUnlockTarget: Math.floor(nextUnlock),
-            prizePool: nextPrize,
-            coinExchanges: nextExchanges,
-            dailyTasks: nextDaily,
-            specialTasks: nextSpecial,
-        };
-        state = getInitialState();
-        return { ok: true, message: '配置已保存并生效（已重置今日进度）', config };
     });
 }
 
 export async function changeAdminPassword(token: string, oldPassword: string, newPassword: string): Promise<ApiResponse> {
-    if (!verifyToken(token)) return unauthorized();
-    if (oldPassword !== adminPassword) return { ok: false, message: '旧密码不正确' };
-    const next = String(newPassword || '').trim();
-    if (next.length < 4) return { ok: false, message: '新密码至少 4 位' };
-    adminPassword = next;
-    return { ok: true, message: '管理员密码修改成功' };
+    try {
+        if (!verifyToken(token)) return unauthorized();
+        await ensureAdminPasswordLoaded();
+        if (oldPassword !== adminPassword) return { ok: false, message: '旧密码不正确' };
+        const next = String(newPassword || '').trim();
+        if (next.length < 4) return { ok: false, message: '新密码至少 4 位' };
+        const pool = getMysqlPool();
+        await pool.query<ResultSetHeader>(
+            `
+            INSERT INTO lottery_settings (setting_key, value_text)
+            VALUES ('admin_password', ?)
+            ON DUPLICATE KEY UPDATE value_text = VALUES(value_text)
+            `,
+            [next],
+        );
+        adminPassword = next;
+        return { ok: true, message: '管理员密码修改成功' };
+    } catch (error) {
+        return { ok: false, message: getErrorMessage(error) };
+    }
 }
 
 export function extractToken(header: string | null): string {

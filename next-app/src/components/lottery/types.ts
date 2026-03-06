@@ -9,9 +9,19 @@ export type Prize = {
     tier?: PrizeTier
 }
 export type CoinExchange = { name: string; cost: number; description?: string }
-export type TaskCompleteMode = 'checkin' | 'verify'
+export type TaskCompleteMode = 'checkin' | 'verify' | 'draw'
 export type DailyTask = { id: string; title: string; reward: number; maxTimes: number; doneTimes: number; mode: TaskCompleteMode }
 export type SpecialTask = { id: string; title: string; reward: number; done: boolean; mode: TaskCompleteMode }
+export type ContractRequest = {
+    id: number
+    fromUserId: string
+    fromUsername: string
+    toUserId: string
+    toUsername: string
+    whisper: string
+    rejectReason: string | null
+    createdAt: string
+}
 
 export type LotteryState = {
     baseDailyChances: number
@@ -28,4 +38,10 @@ export type LotteryState = {
     specialTasks: SpecialTask[]
     results: string[]
     coins: number
+    contractBound: boolean
+    contractPartnerName: string | null
+    contractIncomingRequests: ContractRequest[]
+    contractOutgoingRequests: ContractRequest[]
+    testMode: boolean
+    canSaveToBackpack: boolean
 }

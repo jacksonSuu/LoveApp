@@ -1,5 +1,14 @@
 # 缘（Nest 全栈版）
 
+## 产品与设计文档（2026 轻量化版本）
+
+- `next-app/docs/01-轻量版产品开发文档.md`：产品定位、IA、优先级、路线图、验收标准
+- `next-app/docs/02-轻量版样式设计文档.md`：视觉规范、组件样式、动效与响应式规则
+- `next-app/docs/03-Agent开发提示词.md`：下次调用开发 Agent 的可复用 Prompt
+- `next-app/docs/04-首页改版PRD.md`：首页“恋爱计时 + 全屏相册背景”详细需求与验收用例
+- `next-app/docs/05-开发任务拆分与排期.md`：首页改版 WBS、工时评估、里程碑与 DoD
+- `next-app/.github/copilot-instructions.md`：工作区自动继承的开发约束
+
 单项目同时开发前后端：
 
 - 后端：Nest API（任务、抽奖、状态管理）
